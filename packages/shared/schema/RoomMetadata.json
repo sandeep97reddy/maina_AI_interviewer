@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "voice": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id"
+  ]
+}
