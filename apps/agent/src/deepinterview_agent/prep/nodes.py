@@ -15,7 +15,8 @@ at an unreachable example.com — green without network access.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any
 
 from ..core.adapters.mock import build_mock
 from ..core.logging import get_logger
@@ -26,7 +27,11 @@ from ..shared_models import (
     CompanyIntel,
     GapAnalysis,
     JobSpec,
+    LanguageMode,
+    PlannedQuestion,
     QuestionPlan,
+    RubricItem,
+    Seniority,
 )
 from .cv_extract import extract_cv_text
 from .prompts import (
@@ -98,6 +103,188 @@ async def fetch_cv(state: PrepState, deps: Deps) -> PrepState:
     return {"cv_text": cv_text}
 
 
+def _detect_seniority(text: str) -> Seniority:
+    low = (text or "").lower()
+    if any(w in low for w in ("staff", "principal", "director", "architect")):
+        return "staff"
+    if any(w in low for w in ("senior", "sr.", "lead")):
+        return "senior"
+    if any(w in low for w in ("junior", "entry", "jr.", "associate")):
+        return "junior"
+    if any(w in low for w in ("intern", "internship", "trainee", "student")):
+        return "intern"
+    return "mid"
+
+
+def _fallback_candidate(cv_text: str) -> CandidateProfile:
+    """Extract a clean, non-mock CandidateProfile from CV text when LLM fails."""
+    lines = [line.strip() for line in (cv_text or "").splitlines() if line.strip()]
+    name = "Candidate"
+    for line in lines[:5]:
+        clean = re.sub(r"[^a-zA-Z\s\.\-']", "", line).strip()
+        if (
+            2 <= len(clean.split()) <= 4
+            and len(clean) <= 40
+            and not any(
+                k in clean.lower()
+                for k in ("resume", "curriculum", "vitae", "profile", "summary", "contact", "experience")
+            )
+        ):
+            name = clean
+            break
+
+    seniority = _detect_seniority(cv_text)
+    headline = f"{seniority.title()} Professional"
+    for line in lines[1:6]:
+        if 5 <= len(line) <= 60 and any(
+            k in line.lower()
+            for k in ("engineer", "developer", "manager", "designer", "lead", "specialist", "scientist", "architect")
+        ):
+            headline = line
+            break
+
+    summary = (
+        f"{name} is an experienced professional with a background in software and technology."
+    )
+    if lines:
+        summary = f"{name}: " + " ".join(lines[:4])[:200]
+
+    return CandidateProfile(
+        name=name,
+        headline=headline,
+        summary_120w=summary,
+        years_experience=5 if seniority in ("senior", "staff") else 3,
+        seniority=seniority,
+        skills=["Problem Solving", "Communication", "Technical Architecture"],
+        projects=[],
+        achievements=[],
+        education=[],
+        spoken_languages=["English"],
+        links=[],
+    )
+
+
+def _fallback_job(req: Any) -> JobSpec:
+    """Extract a clean, non-mock JobSpec from request and JD text when LLM fails."""
+    company_name = req.company.strip() if getattr(req, "company", None) and req.company.strip() else "Target Company"
+    jd_lines = [line.strip() for line in (getattr(req, "jd_text", "") or "").splitlines() if line.strip()]
+
+    title = "Software Engineer"
+    for line in jd_lines[:5]:
+        if 4 <= len(line) <= 60 and any(
+            k in line.lower()
+            for k in ("engineer", "developer", "architect", "lead", "manager", "analyst", "specialist")
+        ):
+            title = line
+            break
+
+    seniority = _detect_seniority(getattr(req, "jd_text", ""))
+
+    return JobSpec(
+        title=title,
+        company_name=company_name,
+        location="Remote",
+        seniority=seniority,
+        must_have=["Technical proficiency", "System design", "Communication"],
+        nice_to_have=["Domain expertise"],
+        responsibilities=["Develop and deliver high quality solutions"],
+        tech_stack=["Modern stack"],
+        raw_text=getattr(req, "jd_text", "") or f"{title} at {company_name}",
+    )
+
+
+def _fallback_plan(
+    candidate: CandidateProfile,
+    job: JobSpec,
+    company: CompanyIntel,
+    language_mode: LanguageMode,
+) -> QuestionPlan:
+    """Generate meaningful, tailored interview questions when planner LLM fails."""
+    company_name = (
+        company.name
+        if company and company.name and company.name.lower() != "mock"
+        else (job.company_name if job and job.company_name.lower() != "mock" else "our team")
+    )
+    cand_name = candidate.name if candidate and candidate.name.lower() != "mock" else "Candidate"
+    job_title = job.title if job and job.title.lower() != "mock" else "Software Engineer"
+    primary = language_mode.primary
+
+    questions = [
+        PlannedQuestion(
+            id="q_intro",
+            section="intro",
+            text={
+                "en": f"Welcome, {cand_name}. Could you briefly introduce yourself and tell me what excites you about the {job_title} role at {company_name}?",
+                primary: f"Welcome, {cand_name}. Could you briefly introduce yourself and tell me what excites you about the {job_title} role at {company_name}?",
+            },
+            difficulty=2,
+            rubric=[
+                RubricItem(criterion="Clarity and communication", weight=0.5, description="Clear, structured overview"),
+                RubricItem(criterion="Role alignment", weight=0.5, description="Articulates interest in role and company"),
+            ],
+            followups=[
+                "Which recent project best highlights your strengths for this role?",
+            ],
+            target_competency="Communication",
+        ),
+        PlannedQuestion(
+            id="q_technical",
+            section="technical",
+            text={
+                "en": f"In your work relevant to this {job_title} position, could you walk me through an architecture or technical challenge you tackled and how you decided on the final solution?",
+                primary: f"In your work relevant to this {job_title} position, could you walk me through an architecture or technical challenge you tackled and how you decided on the final solution?",
+            },
+            difficulty=3,
+            rubric=[
+                RubricItem(criterion="Technical depth", weight=0.6, description="Explains technical tradeoffs and depth"),
+                RubricItem(criterion="Problem solving", weight=0.4, description="Demonstrates structured debugging or design"),
+            ],
+            followups=[
+                "What trade-offs or constraints did you face, and what would you do differently in retrospect?",
+            ],
+            target_competency="Technical Execution",
+        ),
+        PlannedQuestion(
+            id="q_behavioral",
+            section="behavioral",
+            text={
+                "en": f"At {company_name}, cross-functional alignment is key. Tell me about a time you had a technical disagreement with a colleague or stakeholder and how you reached a resolution.",
+                primary: f"At {company_name}, cross-functional alignment is key. Tell me about a time you had a technical disagreement with a colleague or stakeholder and how you reached a resolution.",
+            },
+            difficulty=3,
+            rubric=[
+                RubricItem(criterion="Collaboration", weight=0.5, description="Shows empathy and constructive consensus"),
+                RubricItem(criterion="Ownership", weight=0.5, description="Demonstrates focus on team outcome"),
+            ],
+            followups=[
+                "How did the outcome impact the team's delivery and relationship?",
+            ],
+            target_competency="Collaboration",
+        ),
+        PlannedQuestion(
+            id="q_wrap",
+            section="wrap",
+            text={
+                "en": f"Thank you, {cand_name}. To wrap up our conversation today, what questions do you have for me about {company_name} or the {job_title} team?",
+                primary: f"Thank you, {cand_name}. To wrap up our conversation today, what questions do you have for me about {company_name} or the {job_title} team?",
+            },
+            difficulty=1,
+            rubric=[
+                RubricItem(criterion="Engagement", weight=1.0, description="Thoughtful questions about company and role"),
+            ],
+            followups=[],
+            target_competency="Culture Fit",
+        ),
+    ]
+
+    return QuestionPlan(
+        sections_order=["intro", "technical", "behavioral", "wrap"],
+        questions=questions,
+        time_budget_min=30,
+        language_mode=language_mode,
+    )
+
+
 @traced("prep.cv_analysis")
 async def cv_analysis(state: PrepState, deps: Deps) -> PrepState:
     """Extract a ``CandidateProfile`` from the fetched CV text."""
@@ -107,9 +294,9 @@ async def cv_analysis(state: PrepState, deps: Deps) -> PrepState:
             system=system, user=user, schema=CandidateProfile
         )
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
-        log.warning("cv_analysis failed, using minimal profile (%s)", exc)
-        candidate = build_mock(CandidateProfile)
-        await _warn(state, deps, ["Could not analyze the CV; used a minimal profile."])
+        log.warning("cv_analysis failed, using fallback profile (%s)", exc)
+        candidate = _fallback_candidate(state.get("cv_text", ""))
+        await _warn(state, deps, ["Could not analyze the CV with LLM; extracted profile directly."])
     await _mark(state, deps, "cv_analysis")
     return {"candidate": candidate}
 
@@ -122,10 +309,10 @@ async def jd_analysis(state: PrepState, deps: Deps) -> PrepState:
     try:
         job = await deps.llm.complete_json(system=system, user=user, schema=JobSpec)
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
-        log.warning("jd_analysis failed, using minimal job spec (%s)", exc)
-        job = build_mock(JobSpec)
+        log.warning("jd_analysis failed, using fallback job spec (%s)", exc)
+        job = _fallback_job(req)
         await _warn(
-            state, deps, ["Could not analyze the job description; used a minimal spec."]
+            state, deps, ["Could not analyze the job description with LLM; extracted job spec directly."]
         )
     await _mark(state, deps, "jd_analysis")
     return {"job": job}
@@ -300,10 +487,17 @@ async def question_planner(state: PrepState, deps: Deps) -> PrepState:
             system=system, user=user, schema=QuestionPlan
         )
     except Exception as exc:  # noqa: BLE001 - keystone must still emit a valid plan
-        log.warning("question_planner failed, using minimal generic plan (%s)", exc)
-        plan = build_mock(QuestionPlan)
+        log.warning("question_planner failed, using tailored fallback plan (%s)", exc)
+        plan = _fallback_plan(
+            candidate=state["candidate"],
+            job=state["job"],
+            company=state["company"],
+            language_mode=req.language_mode,
+        )
         await _warn(
-            state, deps, ["Could not tailor the question plan; used a generic one."]
+            state,
+            deps,
+            ["Could not tailor the question plan with LLM; used a structured fallback plan."],
         )
     # Pin the language mode to the request so the live loop routes voice correctly,
     # regardless of what the model echoed back.

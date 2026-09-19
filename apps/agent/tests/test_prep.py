@@ -128,3 +128,47 @@ def test_run_prep_ingest_failure_does_not_break_prep(monkeypatch) -> None:
     monkeypatch.setattr(deps, "knowledge", _BoomKnowledge())
     session_id = asyncio.run(run_prep(_request(), deps))
     assert deps.repo.get_status(session_id) == "ready"
+
+
+def test_smart_fallbacks_never_return_mock_or_intern() -> None:
+    """When LLM analysis fails, fallbacks must extract real details and never default to mock/intern."""
+    from deepinterview_agent.prep.nodes import (
+        _fallback_candidate,
+        _fallback_job,
+        _fallback_plan,
+    )
+    from deepinterview_agent.shared_models import CompanyIntel
+
+    cv = "Sandeep Sharma\nSenior Fullstack Engineer\n6 years experience in Python and React."
+    cand = _fallback_candidate(cv)
+    assert cand.name == "Sandeep Sharma"
+    assert cand.seniority == "senior"
+    assert cand.name != "mock"
+    assert cand.seniority != "intern"
+
+    req = _request()
+    job = _fallback_job(req)
+    assert job.company_name == "ExampleCorp"
+    assert job.seniority == "senior"
+    assert job.title != "mock"
+    assert job.company_name != "mock"
+    assert job.seniority != "intern"
+
+    comp = CompanyIntel(
+        name="ExampleCorp",
+        summary="",
+        tech_stack=[],
+        values=[],
+        interview_process=[],
+        recent_news=[],
+        citations=[],
+    )
+    plan = _fallback_plan(cand, job, comp, req.language_mode)
+    assert len(plan.questions) >= 3
+    for q in plan.questions:
+        en_text = q.text["en"]
+        assert "mock" not in en_text.lower()
+        assert q.target_competency != "mock"
+    assert "Sandeep Sharma" in plan.questions[0].text["en"]
+    assert "ExampleCorp" in plan.questions[0].text["en"]
+

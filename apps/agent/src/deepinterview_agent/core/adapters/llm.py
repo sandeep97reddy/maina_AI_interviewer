@@ -9,9 +9,11 @@ module imports cleanly with no SDK installed.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from typing import TYPE_CHECKING, Any
 
+from ..config import mask_key
 from ..logging import get_logger
 from .base import LLMAdapter
 from .mock import MockLLM
@@ -89,36 +91,94 @@ def _loads_json(text: str) -> Any:
 
 
 class GeminiLLM:
-    """Google Gemini via ``google-genai`` (lazy import)."""
+    """Google Gemini via ``google-genai`` (lazy import), with key rotation.
+
+    ``api_keys`` is one key or a list (comma-separated ``GEMINI_API_KEY`` is
+    split by ``Settings.gemini_keys``): consecutive calls round-robin across
+    keys, and a quota error (429) fails over to the next key with NO sleep.
+    Clients are cached per key — ``genai.Client`` construction is not free.
+    """
 
     def __init__(
         self,
-        api_key: str,
+        api_keys: str | list[str],
         model: str,
         timeout_sec: float = _DEFAULT_TIMEOUT_SEC,
     ) -> None:
         # No default model: ids retire fast, so the current id lives in ONE
         # place (Settings.gemini_model) and must be passed in explicitly.
-        self._api_key = api_key
+        if isinstance(api_keys, str):
+            api_keys = [api_keys]
+        keys = [k.strip() for k in (api_keys or []) if k and k.strip()]
+        if not keys:
+            raise ValueError("GeminiLLM needs at least one API key")
+        self._api_keys = keys
         self._model = model
         self._timeout = timeout_sec
+        self._clients: dict[str, Any] = {}
+        self._rr = itertools.count()
 
-    def _client(self) -> Any:
-        try:
-            from google import genai
-        except ImportError as exc:  # pragma: no cover - depends on optional SDK
-            raise RuntimeError(
-                "google-genai is not installed; install the 'gemini' extra."
-            ) from exc
-        return genai.Client(api_key=self._api_key)
+    def _model_chain(self) -> list[str]:
+        candidates = [self._model, "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+        seen: set[str] = set()
+        res: list[str] = []
+        for m in candidates:
+            if m and m not in seen:
+                seen.add(m)
+                res.append(m)
+        return res
 
-    async def complete_text(self, *, system: str, user: str) -> str:
-        client = self._client()
-        for attempt in range(3):
+    def _is_quota_error(self, exc: Exception) -> bool:
+        """429 / quota-exhausted: the KEY is spent, not the model — fail over to
+        the next key immediately (no sleep, no model hop on the dead key)."""
+        msg = str(exc)
+        low = msg.lower()
+        return (
+            "429" in msg
+            or "RESOURCE_EXHAUSTED" in msg
+            or "resource exhausted" in low
+            or "rate limit" in low
+            or "rate_limit" in low
+            or "quota" in low
+        )
+
+    def _is_retryable_gemini_error(self, exc: Exception) -> bool:
+        msg = str(exc)
+        low = msg.lower()
+        return any(k in msg for k in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")) or any(
+            k in low for k in ("quota", "demand", "rate limit", "rate_limit", "resource exhausted")
+        )
+
+    def _client_for(self, key: str) -> Any:
+        """Cached ``genai.Client`` for a key (built once, reused every call)."""
+        client = self._clients.get(key)
+        if client is None:
+            try:
+                from google import genai
+            except ImportError as exc:  # pragma: no cover - depends on optional SDK
+                raise RuntimeError(
+                    "google-genai is not installed; install the 'gemini' extra."
+                ) from exc
+            client = genai.Client(api_key=key)
+            self._clients[key] = client
+        return client
+
+    async def _generate_text(self, client: Any, *, system: str, user: str) -> str:
+        """One key's attempt: the model fallback chain, exactly as before.
+
+        Quota errors escape IMMEDIATELY (the outer loop fails over to the next
+        key with no sleep); other transient errors keep the historic
+        sleep-and-next-model behaviour.
+        """
+        models = self._model_chain()
+        max_attempts = min(3, len(models))
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            model = models[attempt]
             try:
                 resp = await asyncio.wait_for(
                     client.aio.models.generate_content(
-                        model=self._model,
+                        model=model,
                         contents=user,
                         config={"system_instruction": system},
                     ),
@@ -126,21 +186,38 @@ class GeminiLLM:
                 )
                 return resp.text or ""
             except Exception as exc:
-                if attempt < 2 and ("503" in str(exc) or "UNAVAILABLE" in str(exc)):
-                    log.warning("Gemini 503 UNAVAILABLE on attempt %d; retrying in 2s...", attempt + 1)
-                    await asyncio.sleep(2.0 * (attempt + 1))
+                last_exc = exc
+                if self._is_quota_error(exc):
+                    raise
+                if attempt < max_attempts - 1 and self._is_retryable_gemini_error(exc):
+                    delay = 2.0 * (attempt + 1)
+                    next_model = models[attempt + 1]
+                    log.warning(
+                        "Gemini transient error on attempt %d with %s (%s); retrying with %s in %.1fs...",
+                        attempt + 1,
+                        model,
+                        exc,
+                        next_model,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 raise
+        if last_exc:
+            raise last_exc
+        return ""
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
-        # JSON mode + schema-in-prompt (see _schema_prompt for why not
-        # ``response_schema``).
-        client = self._client()
-        for attempt in range(3):
+    async def _generate_json(self, client: Any, *, system: str, user: str, schema: type) -> Any:
+        """One key's JSON attempt — same quota-immediate / transient-sleep split."""
+        models = self._model_chain()
+        max_attempts = min(3, len(models))
+        last_exc: Exception | None = None
+        for attempt in range(max_attempts):
+            model = models[attempt]
             try:
                 resp = await asyncio.wait_for(
                     client.aio.models.generate_content(
-                        model=self._model,
+                        model=model,
                         contents=user,
                         config={
                             "system_instruction": _schema_prompt(system, schema),
@@ -151,11 +228,75 @@ class GeminiLLM:
                 )
                 return schema.model_validate(_loads_json(resp.text or "{}"))
             except Exception as exc:
-                if attempt < 2 and ("503" in str(exc) or "UNAVAILABLE" in str(exc)):
-                    log.warning("Gemini 503 UNAVAILABLE on attempt %d; retrying in 2s...", attempt + 1)
-                    await asyncio.sleep(2.0 * (attempt + 1))
+                last_exc = exc
+                if self._is_quota_error(exc):
+                    raise
+                if attempt < max_attempts - 1 and self._is_retryable_gemini_error(exc):
+                    delay = 2.0 * (attempt + 1)
+                    next_model = models[attempt + 1]
+                    log.warning(
+                        "Gemini transient error on attempt %d with %s (%s); retrying with %s in %.1fs...",
+                        attempt + 1,
+                        model,
+                        exc,
+                        next_model,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
                     continue
                 raise
+        if last_exc:
+            raise last_exc
+        return None
+
+    async def complete_text(self, *, system: str, user: str) -> str:
+        """Round-robin across keys; quota failure jumps to the next key at once."""
+        n = len(self._api_keys)
+        start = next(self._rr) % n
+        last_exc: Exception | None = None
+        for ki in range(n):
+            key = self._api_keys[(start + ki) % n]
+            if ki > 0:
+                log.warning(
+                    "Gemini quota exhausted; failing over to key %s (no delay)...",
+                    mask_key(key),
+                )
+            try:
+                return await self._generate_text(
+                    self._client_for(key), system=system, user=user
+                )
+            except Exception as exc:
+                last_exc = exc
+                if self._is_quota_error(exc) and ki < n - 1:
+                    continue
+                raise
+        if last_exc:  # pragma: no cover - loop always returns or raises
+            raise last_exc
+        return ""
+
+    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+        # JSON mode + schema-in-prompt (see _schema_prompt for why not
+        # ``response_schema``).
+        n = len(self._api_keys)
+        start = next(self._rr) % n
+        last_exc: Exception | None = None
+        for ki in range(n):
+            key = self._api_keys[(start + ki) % n]
+            if ki > 0:
+                log.warning(
+                    "Gemini quota exhausted; failing over to key %s (no delay)...",
+                    mask_key(key),
+                )
+            try:
+                return await self._generate_json(
+                    self._client_for(key), system=system, user=user, schema=schema
+                )
+            except Exception as exc:
+                last_exc = exc
+                if self._is_quota_error(exc) and ki < n - 1:
+                    continue
+                raise
+        return None
 
 
 class OpenAILLM:
@@ -263,8 +404,9 @@ def get_llm(settings: Settings) -> LLMAdapter:
         return MockLLM()
     timeout = getattr(settings, "llm_call_timeout_sec", _DEFAULT_TIMEOUT_SEC)
     if provider == "gemini":
-        if settings.gemini_api_key:
-            return GeminiLLM(settings.gemini_api_key, settings.gemini_model, timeout)
+        keys = settings.gemini_keys
+        if keys:
+            return GeminiLLM(keys, settings.gemini_model, timeout)
         log.warning("llm_provider=gemini but gemini_api_key is missing; using MockLLM.")
         return MockLLM()
     if provider == "openai":

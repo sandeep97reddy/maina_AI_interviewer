@@ -8,9 +8,21 @@ adapter factories log a warning and fall back to the deterministic mock.
 
 from __future__ import annotations
 
+import itertools
 from functools import lru_cache
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def mask_key(key: str | None) -> str:
+    """Render an API key safe for logs/traces: first 8 + last 4 chars."""
+    if not key:
+        return "<none>"
+    s = key.strip()
+    if len(s) <= 12:
+        return "***"
+    return f"{s[:8]}...{s[-4:]}"
 
 
 class Settings(BaseSettings):
@@ -114,6 +126,11 @@ class Settings(BaseSettings):
     local_provider_timeout_sec: float = 30.0
 
     # --- provider credentials (all optional) ---------------------------------
+    # GEMINI_API_KEY accepts a comma-separated list for key rotation
+    # (e.g. "keyA,keyB"): prep/scoring round-robin across them and fail over
+    # on 429s. Keys MUST belong to different Google Cloud projects, or they
+    # share one quota pool and rotation gains nothing. A single key works
+    # exactly as before.
     gemini_api_key: str | None = None
     openai_api_key: str | None = None
     soniox_api_key: str | None = None
@@ -122,6 +139,30 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str | None = None
     tavily_api_key: str | None = None
     exa_api_key: str | None = None
+
+    # Round-robin position for next_gemini_key(). Private (not a setting, not
+    # parsed from env). itertools.count.__next__ is GIL-atomic, and the cached
+    # Settings instance is shared process-wide, so concurrent prep/scoring
+    # calls in the API process spread across keys without a lock.
+    _gemini_key_counter: itertools.count = PrivateAttr(
+        default_factory=itertools.count
+    )
+
+    @property
+    def gemini_keys(self) -> list[str]:
+        """Parsed Gemini key list (comma-separated GEMINI_API_KEY)."""
+        if not self.gemini_api_key:
+            return []
+        return [
+            k.strip() for k in self.gemini_api_key.split(",") if k.strip()
+        ]
+
+    def next_gemini_key(self) -> str | None:
+        """Next key in round-robin order, or None when unconfigured."""
+        keys = self.gemini_keys
+        if not keys:
+            return None
+        return keys[next(self._gemini_key_counter) % len(keys)]
 
     # --- supabase ------------------------------------------------------------
     supabase_url: str | None = None

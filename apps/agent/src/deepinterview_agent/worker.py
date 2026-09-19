@@ -27,7 +27,7 @@ from livekit.agents import (
     metrics,
 )
 
-from .core.config import get_settings
+from .core.config import get_settings, mask_key
 from .core.deps import build_deps
 from .core.logging import get_logger
 from .core.observability import init_observability
@@ -386,8 +386,12 @@ def build_llm(settings):
     if provider == "gemini" and settings.gemini_api_key:
         from livekit.plugins import google
 
-        # Live tier: lowest-latency flash on the real-time turn path.
-        return google.LLM(model=settings.gemini_model_live, api_key=settings.gemini_api_key)
+        # Live tier: lowest-latency flash on the real-time turn path. The
+        # plugin takes ONE key, so rotation happens per session: each interview
+        # picks the next key, spreading concurrent interviews across the pool.
+        key = settings.next_gemini_key() or settings.gemini_api_key
+        log.info("build_llm: live interview on Gemini key %s", mask_key(key))
+        return google.LLM(model=settings.gemini_model_live, api_key=key)
     log.warning("build_llm: no configured LLM provider/key; using OpenAI default")
     from livekit.plugins import openai
 
@@ -501,8 +505,9 @@ def build_tts(settings, language="en", voice=None):
     if needs_non_cartesia and provider != "elevenlabs" and settings.gemini_api_key:
         from livekit.plugins.google.beta import GeminiTTS
 
+        key = settings.next_gemini_key() or settings.gemini_api_key
         log.info("build_tts: %r unsupported by Cartesia; using Gemini TTS fallback", language)
-        return GeminiTTS(model=settings.gemini_tts_model, api_key=settings.gemini_api_key)
+        return GeminiTTS(model=settings.gemini_tts_model, api_key=key)
 
     if provider == "cartesia" and settings.cartesia_api_key:
         from livekit.plugins import cartesia

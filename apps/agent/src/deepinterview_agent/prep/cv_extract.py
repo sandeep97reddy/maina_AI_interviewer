@@ -131,7 +131,9 @@ async def _gemini_extract(data: bytes, mime: str, deps: Deps) -> str:
         return ""
 
     try:
-        client = genai.Client(api_key=settings.gemini_api_key)
+        # Rotating pick so scanned-PDF OCR doesn't always burden key #1.
+        key = settings.next_gemini_key() or settings.gemini_api_key
+        client = genai.Client(api_key=key)
         resp = await client.aio.models.generate_content(
             model=settings.gemini_model,
             contents=[
