@@ -72,6 +72,9 @@ export const en = {
     micIdle: "Not checked yet",
     micTest: "Test mic",
     micStop: "Stop mic",
+    voicePreview: "Preview voice",
+    voiceStop: "Stop",
+    voiceLoading: "Loading…",
   },
   interview: {
     title: "Interview in progress",

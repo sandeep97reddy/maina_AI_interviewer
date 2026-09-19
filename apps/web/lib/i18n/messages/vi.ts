@@ -88,6 +88,9 @@ export const vi: Localized<Messages> = {
     micIdle: "Chưa kiểm tra",
     micTest: "Kiểm tra micro",
     micStop: "Tắt micro",
+    voicePreview: "Nghe thử giọng",
+    voiceStop: "Dừng",
+    voiceLoading: "Đang tải…",
   },
   interview: {
     title: "Đang phỏng vấn",

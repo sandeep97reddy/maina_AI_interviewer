@@ -33,6 +33,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/spinner";
 import { DeviceCheck } from "@/components/setup/device-check";
+import { VoicePreviewButton } from "@/components/setup/voice-preview-button";
 
 type Step = { key: string; label: string };
 
@@ -600,30 +601,42 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 pb-6 lg:grid-cols-4">
           {PERSONAS.map((p) => (
-            <button
+            <div
               key={p.id}
-              type="button"
-              onClick={() => setPersonaId(p.id)}
-              aria-pressed={personaId === p.id}
               className={cn(
-                "flex flex-col gap-2 rounded-[10px] border p-3 text-left transition-colors",
+                "flex flex-col gap-2 rounded-[10px] border p-3 transition-colors",
                 personaId === p.id
                   ? "border-accent bg-accent-soft"
                   : "border-line hover:border-ink",
               )}
             >
-              <div
-                className="flex aspect-[4/3] w-full items-center justify-center rounded-md text-5xl"
-                style={{ backgroundColor: `${p.color}1f` }}
-                aria-hidden
+              <button
+                type="button"
+                onClick={() => setPersonaId(p.id)}
+                aria-pressed={personaId === p.id}
+                className="flex flex-col gap-2 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2"
               >
-                {p.emoji}
-              </div>
-              <div>
-                <p className="text-[14px] font-medium text-ink">{p.name}</p>
-                <p className="text-[12px] leading-snug text-muted">{p.style}</p>
-              </div>
-            </button>
+                <span
+                  className="flex aspect-[4/3] w-full items-center justify-center rounded-md text-5xl"
+                  style={{ backgroundColor: `${p.color}1f` }}
+                  aria-hidden
+                >
+                  {p.emoji}
+                </span>
+                <span>
+                  <span className="block text-[14px] font-medium text-ink">
+                    {p.name}
+                  </span>
+                  <span className="block text-[12px] leading-snug text-muted">
+                    {p.style}
+                  </span>
+                </span>
+              </button>
+              <VoicePreviewButton
+                edgeVoice={p.edgeVoice}
+                personaName={p.name}
+              />
+            </div>
           ))}
         </CardContent>
       </Card>
