@@ -899,7 +899,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 },
             )
         finally:
-            _live_trace.__exit__(None, None, None)
+            try:
+                _live_trace.__exit__(None, None, None)
+            except Exception:
+                pass
 
         # Stop the checkpointer first so it can't race the final, authoritative
         # persist below.

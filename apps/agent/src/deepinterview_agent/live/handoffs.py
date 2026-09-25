@@ -23,15 +23,20 @@ from .interviewer import Interviewer, _localized
 _CODING_INSTRUCTIONS = (
     "You are now running the CODING round. Pose one focused, hands-on problem "
     "tied to the candidate's stack. Ask them to think aloud; nudge with a single "
-    "hint if they stall. Do not lecture. When the problem is resolved or time is "
-    "tight, call save_answer then get_next_question."
+    "hint if they stall. Do not lecture. Stay on the problem: if the answer is "
+    "brief or high-level (under ~35 words), probe for approach, trade-offs, "
+    "complexity, or edge cases first. Only when the solution is discussed in "
+    "depth (or the candidate asks to move on), call save_answer then get_next_question. "
+    "Note: get_next_question refuses to advance under ~25 words without an explicit skip."
 )
 
 _BEHAVIORAL_INSTRUCTIONS = (
     "You are now running the BEHAVIORAL round. Ask one STAR-style question at a "
     "time about real past experience. Listen, then ask exactly one probing "
-    "follow-up for specifics (the 'I' not the 'we'). Then call save_answer and "
-    "get_next_question. Warm, concise, never leading."
+    "follow-up for specifics (the 'I' not the 'we'). If the answer stays brief "
+    "or high-level, keep probing before moving on. Then call save_answer and "
+    "get_next_question. Warm, concise, never leading. "
+    "Note: get_next_question refuses to advance under ~25 words without an explicit skip."
 )
 
 

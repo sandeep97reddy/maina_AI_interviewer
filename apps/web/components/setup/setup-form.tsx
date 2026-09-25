@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { UploadCloud, FileText, X } from "lucide-react";
 import { type InterviewContext, type LanguageMode } from "@deepinterview/shared";
-import { startSession, startSessionFromContext } from "@/app/setup/actions";
+import { refreshQuestions, startSession, startSessionFromContext } from "@/app/setup/actions";
 import {
   clearCachedContext,
   describeCachedContext,
@@ -64,6 +64,7 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
 
   const [dragging, setDragging] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [activeStep, setActiveStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   // Surface inline field errors once the user has interacted with a field (or
@@ -88,8 +89,7 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
     }
   }, []);
 
-  // --- Client-side input validation (friendly; backend is the real guard) ---
-  // CV is satisfied by a chosen file (length unknown synchronously) OR pasted
+  // --- Client-side input validation (friendly; backend is the real guard) ---  // CV is satisfied by a chosen file (length unknown synchronously) OR pasted
   // text of at least MIN_CV_CHARS. JD must be present + reasonably long.
   // Company is optional.
   const cvLen = cvText.trim().length;
@@ -300,6 +300,33 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
     { key: "company", label: t(messages, "setup.stepCompany") },
     { key: "plan", label: t(messages, "setup.stepPlan") },
   ];
+
+  /** Fresh questions from the cached analysis (1 planner call, ~3s). */
+  async function onRefreshQuestions() {
+    if (!cached || refreshing) return;
+    setError(null);
+    setRefreshing(true);
+    try {
+      const result = await refreshQuestions(cached.context.session_id);
+      if (!result.ok) {
+        if (result.reason === "auth_required") {
+          router.push("/login?next=/setup");
+          return;
+        }
+        setError(result.error);
+        setRefreshing(false);
+        return;
+      }
+      router.push(
+        `/session/${result.session_id}${
+          personaId ? `?persona=${encodeURIComponent(personaId)}` : ""
+        }`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t(messages, "common.error"));
+      setRefreshing(false);
+    }
+  }
 
   if (submitting) {
     const researching = t(messages, "setup.researching").replace(
@@ -734,6 +761,17 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
               className="self-start text-[12px] text-muted underline hover:text-ink"
             >
               Clear cache
+            </button>
+            <button
+              type="button"
+              onClick={onRefreshQuestions}
+              disabled={refreshing || submitting}
+              className="inline-flex items-center gap-1.5 self-start text-[13px] font-medium text-accent disabled:opacity-40"
+            >
+              {refreshing && <Spinner className="h-3.5 w-3.5" />}
+              {refreshing
+                ? "Generating fresh questions…"
+                : "⚡ Generate new questions (same prep, 1 quick call)"}
             </button>
           </CardContent>
         </Card>

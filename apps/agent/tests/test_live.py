@@ -414,3 +414,69 @@ def test_reconstruct_answers_never_recovers_wrap_phase_speech() -> None:
 
     assert state.reconstruct_answers(ud) == 0
     assert ud.ctx.answers == []
+
+
+# --- get_next_question substance gate (offline pins for the machine-gun fix) ---
+
+
+def test_substance_words_counts_max_of_spoken_and_saved() -> None:
+    """The gate reads transcript speech AND saved answers (max), so a forgotten
+    save_answer call can never make a substantive answer look thin."""
+    ud = _userdata()
+    q1 = state.current_question(ud)
+    assert q1 is not None
+    assert state.current_question_substance_words(ud) == 0
+
+    state.add_turn(ud, "user", "one two three four five")
+    assert state.current_question_substance_words(ud) == 5
+
+    state.save_answer(
+        ud,
+        transcript=" ".join(f"w{i}" for i in range(30)),
+        started_at="",
+        ended_at="",
+    )
+    assert state.current_question_substance_words(ud) == 30
+
+
+def test_advance_gate_blocks_thin_allows_substantive() -> None:
+    """Mirror of the get_next_question tool condition (which needs livekit):
+    substance < _MIN_ADVANCE_WORDS without skip intent blocks; >= threshold
+    or explicit skip allows."""
+    ud = _userdata()
+    state.add_turn(ud, "user", "one two three four five")
+    substance = state.current_question_substance_words(ud)
+    assert substance < state._MIN_ADVANCE_WORDS
+    assert not state.candidate_wants_to_skip(state.current_question_user_speech(ud))
+
+    long_answer = " ".join(f"w{i}" for i in range(state._MIN_ADVANCE_WORDS + 5))
+    state.add_turn(ud, "user", long_answer)
+    assert state.current_question_substance_words(ud) >= state._MIN_ADVANCE_WORDS
+
+
+def test_candidate_wants_to_skip_word_boundaries() -> None:
+    """'pass' must not fire inside 'passing/bypass/compass'; explicit intents do."""
+    assert not state.candidate_wants_to_skip("I am passing the data through Kafka")
+    assert not state.candidate_wants_to_skip("we added a bypass cache for reads")
+    assert not state.candidate_wants_to_skip("a compass for direction")
+    assert state.candidate_wants_to_skip("let's skip this one")
+    assert state.candidate_wants_to_skip("please go to the next question")
+    assert state.candidate_wants_to_skip("can we move on please")
+    assert state.candidate_wants_to_skip("let's pass on this")
+    assert state.candidate_wants_to_skip("I have no idea on this one")
+
+
+def test_candidate_wants_to_skip_apostrophe_variants() -> None:
+    """don't/dont/don't (curly) and 'do not know' all count as skip."""
+    assert state.candidate_wants_to_skip("I don't know this one")
+    assert state.candidate_wants_to_skip("I dont know this one")
+    assert state.candidate_wants_to_skip("I don\u2019t know this one")
+    assert state.candidate_wants_to_skip("I do not know this one")
+
+
+def test_candidate_wants_to_skip_ignores_hesitant_thinking() -> None:
+    """'I'm not sure, let me think...' is a thin answer needing a probe — NOT
+    a skip. Treating it as skip burned questions on thinking pauses."""
+    assert not state.candidate_wants_to_skip("I'm not sure, let me think for a moment")
+    assert not state.candidate_wants_to_skip("")
+    assert not state.candidate_wants_to_skip([])

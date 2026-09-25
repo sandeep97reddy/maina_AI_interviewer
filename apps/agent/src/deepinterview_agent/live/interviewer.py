@@ -56,25 +56,41 @@ def build_instructions(ud: InterviewUserdata) -> str:
     question_line = (
         _localized(q.text, primary) if q is not None else "(no further questions)"
     )
+    followup_line = (
+        q.followups[0]
+        if (q is not None and q.followups)
+        else "Ask for concrete technical details, trade-offs, or an architecture walkthrough."
+    )
+    competency = q.target_competency if q is not None else "General"
+    section = q.section if q is not None else "wrap"
     return (
-        "You are a professional technical interviewer running a realistic "
-        "mock interview. Speak naturally and concisely.\n\n"
+        "You are an experienced, professional technical interviewer running an authentic "
+        "mock interview. Speak naturally, warmly, and concisely (1-2 sentences at a time).\n\n"
         f"{summary}\n\n"
         f"Primary language: {primary}.\n"
         f"Progress: question {min(ud.ctx.cursor + 1, total) if total else 0} of {total} "
         f"({remaining} remaining).\n"
-        f"Current question to ask: {question_line}\n\n"
-        "Strict interview rules:\n"
-        "1. Ask the current question clearly and wait for the candidate's complete answer.\n"
-        "2. You may ask at most one short, natural follow-up if an answer lacks depth.\n"
-        "3. Once the answer is complete, you MUST call save_answer with the candidate's answer.\n"
-        "4. Immediately call get_next_question to fetch the next question and ask it.\n"
-        "5. You MUST proceed through ALL planned questions in order. Do NOT skip questions or end early.\n"
+        f"Active question ({section} - {competency}): {question_line}\n"
+        f"Suggested follow-up probe: {followup_line}\n\n"
+        "Essential interview rules:\n"
+        "1. This is a real technical conversation, NOT a rapid-fire quiz. Spend 3 to 4 minutes discussing EACH question.\n"
+        "2. When you ask a question, the candidate will often give a short initial remark or pause to think. "
+        "DO NOT immediately move to the next question.\n"
+        "3. If the candidate's response is brief or high-level (under ~35 words or lacking technical depth), "
+        "stay on the current question! Ask a natural, probing follow-up (use the suggested follow-up probe, or ask "
+        "for trade-offs, architecture, edge cases, or failure modes). Do NOT call get_next_question yet.\n"
+        "4. ONLY after the candidate has provided a substantive, detailed explanation of the current topic "
+        "(or explicitly asks to move on):\n"
+        "   - Call save_answer with their full answer.\n"
+        "   - Call get_next_question to fetch the next planned question and ask it.\n"
+        "5. NEVER call get_next_question on a 1-sentence answer or brief fragment. Explore each question deeply.\n"
+        "   The get_next_question tool enforces this: with under ~25 words of candidate speech "
+        "(and no explicit 'skip' request) it will refuse to advance and hand you a follow-up probe instead.\n"
         "6. Only call start_coding_round when the current question section is coding, "
         "and start_behavioral_round when it is behavioral — and only AFTER save_answer.\n"
-        "7. On the final wrap question, ask if the candidate has any questions for you, "
-        "answer concisely, call save_answer, thank them warmly, and call end_interview.\n"
-        "Use request_clarification only if the candidate seems confused. "
+        "7. Only on the final wrap question (question 7 of 7), invite the candidate to ask any questions "
+        "they have about the company or role. Answer warmly and concisely, call save_answer, thank them, "
+        "and call end_interview.\n"
         "Never read the rubric aloud."
     )
 
@@ -162,15 +178,36 @@ class Interviewer(Agent):
     async def get_next_question(self, context: RunContext[InterviewUserdata]) -> str:
         """Advance to the next planned question and return it (or a wrap signal)."""
         ud = context.userdata
+        q = state.current_question(ud)
+        # Hard substance gate: a 1-2 sentence fragment must never burn a question.
+        # The prompt probes under ~35 words; this blocks advancement under
+        # _MIN_ADVANCE_WORDS (25) unless the candidate explicitly asks to skip.
+        if q is not None and q.section != "wrap":
+            substance = state.current_question_substance_words(ud)
+            wants_skip = state.candidate_wants_to_skip(
+                state.current_question_user_speech(ud)
+            )
+            if substance < state._MIN_ADVANCE_WORDS and not wants_skip:
+                followup = (
+                    q.followups[0]
+                    if q.followups
+                    else "Could you elaborate on that and share concrete technical details?"
+                )
+                return (
+                    f"Candidate has only given a brief response ({substance} words). "
+                    f"Do NOT move to the next question yet. Keep the conversation on '{q.section}' "
+                    f"and ask this follow-up probe: {followup}"
+                )
+
         state.advance(ud)
         if state.is_complete(ud):
             return _wrap_signal()
-        q = state.current_question(ud)
-        assert q is not None  # not complete -> a current question exists
+        next_q = state.current_question(ud)
+        assert next_q is not None  # not complete -> a current question exists
         primary = ud.ctx.plan.language_mode.primary
-        text = _localized(q.text, primary)
+        text = _localized(next_q.text, primary)
         await self._refresh_instructions(ud)
-        return f"Next question ({q.section}): {text}"
+        return f"Next question ({next_q.section}): {text}"
 
     @function_tool
     async def request_clarification(

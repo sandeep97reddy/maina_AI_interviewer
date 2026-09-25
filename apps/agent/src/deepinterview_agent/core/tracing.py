@@ -319,7 +319,10 @@ def start_trace(
                 **({"error": error[:500]} if error else {}),
             }
         )
-        _current_trace.reset(token)
+        try:
+            _current_trace.reset(token)
+        except ValueError:
+            _current_trace.set(None)
 
 
 @contextlib.contextmanager
@@ -381,7 +384,14 @@ def start_span(name: str, **attrs: Any) -> Iterator[str]:
             }
         )
         _otel_end(otel_cm, otel_span, status=status, error=error)
-        _span_stack.reset(token)
+        try:
+            _span_stack.reset(token)
+        except ValueError:
+            # Same cross-context hazard as start_trace (worker shutdown drains
+            # from a different context than the turn path). Swallow: the current
+            # context owns its own stack, so there is nothing to roll back here
+            # and tracing must never break shutdown.
+            pass
 
 
 def add_event(name: str, attrs: dict[str, Any] | None = None) -> None:

@@ -57,6 +57,15 @@ export function requestSessionFromContext(
   );
 }
 
+/** Fresh question set for a past session (1 planner LLM call, analysis reused). */
+export function requestNewQuestions(sessionId: string): Promise<PrepResponse> {
+  return postJson(
+    `/api/session/${encodeURIComponent(sessionId)}/new-questions`,
+    {},
+    (d) => PrepResponseSchema.parse(d),
+  );
+}
+
 /** Score a completed interview session. */
 export function requestScore(body: ScoreRequest): Promise<ScoreResponse> {
   return postJson("/api/score", body, (d) => ScoreResponseSchema.parse(d));

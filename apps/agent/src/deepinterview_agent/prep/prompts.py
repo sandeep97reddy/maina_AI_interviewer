@@ -191,3 +191,47 @@ def question_planner_prompts(
 def _job_user_payload(req: PrepRequest) -> str:
     """Compact JD payload used by the jd_analysis node (company + raw text)."""
     return f"TARGET COMPANY: {req.company}\n\nJOB DESCRIPTION:\n{req.jd_text}"
+
+
+# --- question refresh --------------------------------------------------------
+
+
+def question_refresh_prompts(
+    candidate: CandidateProfile,
+    job: JobSpec,
+    company: CompanyIntel,
+    gap: GapAnalysis,
+    language_mode: LanguageMode,
+    previous_texts: list[str],
+    sections: list[str],
+    firm: bool = False,
+) -> tuple[str, str]:
+    """System/user prompts for the one-call "new questions" refresh.
+
+    Reuses the base planner prompt (same shape contract: count, section order,
+    difficulty ramp, rubric, followups, translations) and appends the previous
+    session's question texts as an avoid-list. ``firm=True`` is the single
+    retry wording when the first attempt repeated too much.
+    """
+    system, user = question_planner_prompts(candidate, job, company, gap, language_mode)
+    # Override the fixed "EXACTLY 7" line: a refresh must mirror the loaded
+    # plan's shape (count + sections) so the live loop / handoffs contract holds.
+    count = len(sections)
+    order = ", ".join(sections)
+    avoid = "\n".join(f"- {t}" for t in previous_texts if t.strip())
+    strict = (
+        "This is a RETRY: your previous attempt repeated earlier questions. "
+        "You MUST change every question's angle and wording."
+        if firm
+        else "Test DIFFERENT angles of the same gaps — new scenarios, new trade-offs, new wording."
+    )
+    user = (
+        f"{user}\n\n"
+        f"PRODUCE EXACTLY {count} questions in this section order: [{order}]. "
+        f"Keep the rising difficulty curve, target_competency, rubric, followups, "
+        f"and translations exactly as specified above.\n"
+        f"PREVIOUS QUESTIONS (asked last time — do NOT repeat or closely rephrase any):\n"
+        f"{avoid}\n"
+        f"{strict}"
+    )
+    return system, user

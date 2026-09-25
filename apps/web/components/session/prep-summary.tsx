@@ -130,6 +130,8 @@ export function PrepSummary({
 
       {status === "ready" && view?.context && (
         <ReadyView
+          sessionId={sessionId}
+          persona={persona}
           context={view.context}
           warnings={warnings}
           onStart={goInterview}
@@ -640,16 +642,44 @@ function PlanCard({ p }: { p: QuestionPlan }) {
 }
 
 function ReadyView({
+  sessionId,
+  persona,
   context,
   warnings,
   onStart,
   onBackToSetup,
 }: {
+  sessionId: string;
+  persona: string | null;
   context: InterviewContext;
   warnings: string[];
   onStart: () => void;
   onBackToSetup: () => void;
 }) {
+  const router = useRouter();
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
+  async function onRefreshQuestions() {
+    if (refreshing) return;
+    setRefreshError(null);
+    setRefreshing(true);
+    try {
+      const { refreshQuestions } = await import("@/app/setup/actions");
+      const result = await refreshQuestions(sessionId);
+      if (!result.ok) {
+        setRefreshError(result.error);
+        setRefreshing(false);
+        return;
+      }
+      const q = persona ? `?persona=${encodeURIComponent(persona)}` : "";
+      router.push(`/session/${result.session_id}${q}`);
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : "Could not generate fresh questions.");
+      setRefreshing(false);
+    }
+  }
+
   return (
     <div className="mt-8">
       <h1 className="serif text-3xl text-ink sm:text-4xl">What we found</h1>
@@ -682,10 +712,30 @@ function ReadyView({
           Start interview
           <ArrowRight className="h-4 w-4" aria-hidden />
         </Button>
+        <Button
+          variant="out"
+          size="lg"
+          onClick={onRefreshQuestions}
+          disabled={refreshing}
+        >
+          {refreshing ? (
+            <>
+              <Spinner className="h-4 w-4" />
+              Generating…
+            </>
+          ) : (
+            "⚡ New questions"
+          )}
+        </Button>
         <Button variant="out" size="lg" onClick={onBackToSetup}>
           Back to setup
         </Button>
       </div>
+      {refreshError && (
+        <p className="mt-3 text-[13px] text-ink-soft" role="alert">
+          {refreshError}
+        </p>
+      )}
     </div>
   );
 }

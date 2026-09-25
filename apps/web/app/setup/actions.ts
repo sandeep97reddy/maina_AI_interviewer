@@ -2,7 +2,7 @@
 
 import type { InterviewContext, PrepRequest } from "@deepinterview/shared";
 import { features } from "@deepinterview/ee";
-import { requestPrep, requestSessionFromContext } from "@/lib/api";
+import { requestNewQuestions, requestPrep, requestSessionFromContext } from "@/lib/api";
 import { getUser } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/env";
 
@@ -98,6 +98,38 @@ export async function startSessionFromContext(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Could not reuse the cached context.";
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Fresh questions: new ready session from a past session's saved analysis
+ * (1 planner LLM call, no CV/JD/company re-analysis). Same auth gating.
+ */
+export async function refreshQuestions(
+  sessionId: string,
+): Promise<StartSessionResult> {
+  let userId: string | null = null;
+
+  if (isSupabaseConfigured()) {
+    const user = await getUser();
+    if (user) userId = user.id;
+  }
+
+  if (!userId && features.auth) {
+    return {
+      ok: false,
+      error: "Sign in to start an interview.",
+      reason: "auth_required",
+    };
+  }
+
+  try {
+    const { session_id } = await requestNewQuestions(sessionId);
+    return { ok: true, session_id };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Could not generate fresh questions.";
     return { ok: false, error: message };
   }
 }

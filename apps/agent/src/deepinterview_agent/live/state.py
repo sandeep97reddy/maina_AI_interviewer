@@ -16,6 +16,7 @@ the clock or uses randomness, so it is fully reproducible in tests.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -43,6 +44,52 @@ _MAX_DIFFICULTY = 5
 # an answer: recovering it would fire the full LLM scoring pipeline on junk and
 # produce a misleading near-zero report instead of the honest no_answers state.
 _MIN_RECOVERED_WORDS = _THIN_WORDS
+
+# Hard floor for get_next_question advancement (see interviewer.get_next_question).
+# Distinct from _THIN_WORDS (adaptive-difficulty heuristic) and
+# _MIN_RECOVERED_WORDS (shutdown recovery). The live prompt probes under ~35
+# words; the hard block sits at 25 so a 1-2 sentence fragment (5-15 words) can
+# never burn a question while a genuine ~30-word answer advances without friction.
+_MIN_ADVANCE_WORDS = 25
+
+# Explicit skip intents that bypass the substance gate. Word-boundary matched
+# (see candidate_wants_to_skip) so "pass" never fires on "passing/bypass/compass".
+# "not sure" is DELIBERATELY excluded: it signals a thin answer that needs a
+# probe, not a skip — treating it as skip let hesitant thinking ("I'm not sure,
+# let me think...") burn a question.
+_SKIP_PATTERNS = (
+    r"skip",
+    r"next\s+question",
+    r"move\s+on",
+    r"pass",
+    r"don['\u2019\u2018`´]?t\s+know",
+    r"do\s+not\s+know",
+    r"no\s+idea",
+)
+_SKIP_RE = re.compile(r"\b(?:" + "|".join(_SKIP_PATTERNS) + r")\b", re.IGNORECASE)
+
+
+def _normalize_skip_text(text: str) -> str:
+    """Lowercase + unify apostrophe variants so don't/dont/don't all match."""
+    return (
+        text.lower()
+        .replace("\u2019", "'")
+        .replace("\u2018", "'")
+        .replace("`", "'")
+        .replace("\u00b4", "'")
+    )
+
+
+def candidate_wants_to_skip(text: str | list[str]) -> bool:
+    """True when the candidate explicitly asks to skip / move on.
+
+    Accepts a single string or a list of user turns (joined with spaces).
+    Word-boundary regex: "pass" matches "let's pass" but not "passing".
+    """
+    joined = " ".join(text) if isinstance(text, list) else text
+    if not joined or not joined.strip():
+        return False
+    return _SKIP_RE.search(_normalize_skip_text(joined)) is not None
 
 
 @dataclass
@@ -141,6 +188,32 @@ def add_turn(ud: InterviewUserdata, role: str, text: str) -> None:
     ud.transcript.append(
         {"role": role, "text": text, "question_id": q.id if q is not None else ""}
     )
+
+
+def current_question_user_speech(ud: InterviewUserdata) -> list[str]:
+    """Return all user turns spoken for the current question."""
+    q = current_question(ud)
+    if q is None:
+        return []
+    return [
+        (turn.get("text") or "").strip()
+        for turn in ud.transcript
+        if turn.get("role") == "user" and turn.get("question_id") == q.id
+    ]
+
+
+def current_question_substance_words(ud: InterviewUserdata) -> int:
+    """Words spoken or saved for the current question."""
+    q = current_question(ud)
+    if q is None:
+        return 0
+    spoken = sum(len(t.split()) for t in current_question_user_speech(ud) if t)
+    saved = sum(
+        len((a.transcript or "").split())
+        for a in ud.ctx.answers
+        if a.question_id == q.id and a.transcript
+    )
+    return max(spoken, saved)
 
 
 def reconstruct_answers(ud: InterviewUserdata) -> int:
