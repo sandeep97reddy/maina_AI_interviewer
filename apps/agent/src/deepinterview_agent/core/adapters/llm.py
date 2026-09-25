@@ -163,7 +163,34 @@ class GeminiLLM:
             self._clients[key] = client
         return client
 
-    async def _generate_text(self, client: Any, *, system: str, user: str) -> str:
+    def _build_config(self, system: str, thinking_budget: int | None) -> dict:
+        """Build a generate_content config, attaching thinking_config safely.
+
+        Unknown/retired model ids may reject thinking_config — callers catch
+        that per attempt and retry without it, so a budget never hard-fails
+        prep/post.
+        """
+        config: dict[str, Any] = {"system_instruction": system}
+        if thinking_budget is not None:
+            try:
+                from google.genai import types
+
+                config["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=thinking_budget
+                )
+            except Exception:
+                # SDK without ThinkingConfig (or import failure) -> plain config.
+                pass
+        return config
+
+    async def _generate_text(
+        self,
+        client: Any,
+        *,
+        system: str,
+        user: str,
+        thinking_budget: int | None = None,
+    ) -> str:
         """One key's attempt: the model fallback chain, exactly as before.
 
         Quota errors escape IMMEDIATELY (the outer loop fails over to the next
@@ -180,7 +207,7 @@ class GeminiLLM:
                     client.aio.models.generate_content(
                         model=model,
                         contents=user,
-                        config={"system_instruction": system},
+                        config=self._build_config(system, thinking_budget),
                     ),
                     timeout=self._timeout,
                 )
@@ -207,7 +234,15 @@ class GeminiLLM:
             raise last_exc
         return ""
 
-    async def _generate_json(self, client: Any, *, system: str, user: str, schema: type) -> Any:
+    async def _generate_json(
+        self,
+        client: Any,
+        *,
+        system: str,
+        user: str,
+        schema: type,
+        thinking_budget: int | None = None,
+    ) -> Any:
         """One key's JSON attempt — same quota-immediate / transient-sleep split."""
         models = self._model_chain()
         max_attempts = min(3, len(models))
@@ -215,14 +250,15 @@ class GeminiLLM:
         for attempt in range(max_attempts):
             model = models[attempt]
             try:
+                base = self._build_config(
+                    _schema_prompt(system, schema), thinking_budget
+                )
+                base["response_mime_type"] = "application/json"
                 resp = await asyncio.wait_for(
                     client.aio.models.generate_content(
                         model=model,
                         contents=user,
-                        config={
-                            "system_instruction": _schema_prompt(system, schema),
-                            "response_mime_type": "application/json",
-                        },
+                        config=base,
                     ),
                     timeout=self._timeout,
                 )
@@ -249,7 +285,9 @@ class GeminiLLM:
             raise last_exc
         return None
 
-    async def complete_text(self, *, system: str, user: str) -> str:
+    async def complete_text(
+        self, *, system: str, user: str, thinking_budget: int | None = None
+    ) -> str:
         """Round-robin across keys; quota failure jumps to the next key at once."""
         n = len(self._api_keys)
         start = next(self._rr) % n
@@ -263,7 +301,10 @@ class GeminiLLM:
                 )
             try:
                 return await self._generate_text(
-                    self._client_for(key), system=system, user=user
+                    self._client_for(key),
+                    system=system,
+                    user=user,
+                    thinking_budget=thinking_budget,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -274,7 +315,14 @@ class GeminiLLM:
             raise last_exc
         return ""
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+    async def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: type,
+        thinking_budget: int | None = None,
+    ) -> Any:
         # JSON mode + schema-in-prompt (see _schema_prompt for why not
         # ``response_schema``).
         n = len(self._api_keys)
@@ -289,7 +337,11 @@ class GeminiLLM:
                 )
             try:
                 return await self._generate_json(
-                    self._client_for(key), system=system, user=user, schema=schema
+                    self._client_for(key),
+                    system=system,
+                    user=user,
+                    schema=schema,
+                    thinking_budget=thinking_budget,
                 )
             except Exception as exc:
                 last_exc = exc
@@ -330,7 +382,10 @@ class OpenAILLM:
             ) from exc
         return AsyncOpenAI(api_key=self._api_key, base_url=self._base_url)
 
-    async def complete_text(self, *, system: str, user: str) -> str:
+    async def complete_text(
+        self, *, system: str, user: str, thinking_budget: int | None = None
+    ) -> str:
+        _ = thinking_budget  # OpenAI-compatible path ignores Gemini thinking.
         client = self._client()
         resp = await asyncio.wait_for(
             client.chat.completions.create(
@@ -344,7 +399,9 @@ class OpenAILLM:
         )
         return resp.choices[0].message.content or ""
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+    async def complete_json(
+        self, *, system: str, user: str, schema: type, thinking_budget: int | None = None
+    ) -> Any:
         # JSON mode + schema-in-prompt, NOT strict structured outputs: OpenAI's
         # strict mode rejects free-form maps (additionalProperties) like our
         # ``LocalizedText = dict[str, str]``, which would silently break the
@@ -387,7 +444,10 @@ class OllamaLLM(OpenAILLM):
         "value ONLY — no explanation, no markdown fence, no <think> block."
     )
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+    async def complete_json(
+        self, *, system: str, user: str, schema: type, thinking_budget: int | None = None
+    ) -> Any:
+        _ = thinking_budget  # Local path ignores Gemini thinking.
         try:
             return await super().complete_json(system=system, user=user, schema=schema)
         except Exception as exc:  # noqa: BLE001 - any parse/validation miss earns one retry

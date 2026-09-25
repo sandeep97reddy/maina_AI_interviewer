@@ -41,24 +41,41 @@ def _wrap_signal() -> str:
 
 
 def build_instructions(ud: InterviewUserdata) -> str:
-    """Lean per-question system prompt: compact summary + current question."""
+    """Lean per-question system prompt: compact summary + current question.
+
+    Sequential-only: the agent must walk every planned question in order via
+    ``get_next_question``. There is no section-skip tool — ``next_section``
+    was removed because it caused 1-2 question interviews by jumping over
+    remaining questions straight to ``wrap``.
+    """
     primary = ud.ctx.plan.language_mode.primary
     summary = state.compact_summary(ud)
     q = state.current_question(ud)
+    total = len(ud.ctx.plan.questions)
+    remaining = max(0, total - ud.ctx.cursor)
     question_line = (
         _localized(q.text, primary) if q is not None else "(no further questions)"
     )
     return (
-        "You are a senior, friendly technical interviewer running a real-time "
-        "voice mock interview. Speak naturally and concisely.\n\n"
+        "You are a professional technical interviewer running a realistic "
+        "mock interview. Speak naturally and concisely.\n\n"
         f"{summary}\n\n"
         f"Primary language: {primary}.\n"
+        f"Progress: question {min(ud.ctx.cursor + 1, total) if total else 0} of {total} "
+        f"({remaining} remaining).\n"
         f"Current question to ask: {question_line}\n\n"
-        "Ask this one question, listen to the full answer, then ask at most one "
-        "light follow-up. When the answer is complete, call save_answer with the "
-        "candidate's answer, then call get_next_question to proceed. Use "
-        "next_section to move to a different round, request_clarification only if "
-        "the candidate seems confused. Never read the rubric aloud."
+        "Strict interview rules:\n"
+        "1. Ask the current question clearly and wait for the candidate's complete answer.\n"
+        "2. You may ask at most one short, natural follow-up if an answer lacks depth.\n"
+        "3. Once the answer is complete, you MUST call save_answer with the candidate's answer.\n"
+        "4. Immediately call get_next_question to fetch the next question and ask it.\n"
+        "5. You MUST proceed through ALL planned questions in order. Do NOT skip questions or end early.\n"
+        "6. Only call start_coding_round when the current question section is coding, "
+        "and start_behavioral_round when it is behavioral — and only AFTER save_answer.\n"
+        "7. On the final wrap question, ask if the candidate has any questions for you, "
+        "answer concisely, call save_answer, thank them warmly, and call end_interview.\n"
+        "Use request_clarification only if the candidate seems confused. "
+        "Never read the rubric aloud."
     )
 
 
@@ -156,30 +173,6 @@ class Interviewer(Agent):
         return f"Next question ({q.section}): {text}"
 
     @function_tool
-    async def next_section(self, context: RunContext[InterviewUserdata]) -> str:
-        """Skip to the first question of the next section (or wrap if none)."""
-        ud = context.userdata
-        q = state.next_section(ud)
-        if q is None:
-            return _wrap_signal()
-        primary = ud.ctx.plan.language_mode.primary
-        text = _localized(q.text, primary)
-        await self._refresh_instructions(ud)
-        return f"Moving to {q.section}: {text}"
-
-    @function_tool
-    async def get_difficulty_hint(
-        self, context: RunContext[InterviewUserdata]
-    ) -> str:
-        """Advisory hint on whether to go harder/easier, advance, or wrap.
-
-        OPTIONAL and non-binding: consult it only if you're unsure how to pace the
-        current section. It is computed locally from answers already given (no
-        network, no blocking) and never changes the question cursor.
-        """
-        return state.difficulty_hint(context.userdata)
-
-    @function_tool
     async def request_clarification(
         self, context: RunContext[InterviewUserdata], reason: str = ""
     ) -> str:
@@ -202,7 +195,28 @@ class Interviewer(Agent):
         its way. It drains the current speech, then closes the session — which
         triggers the worker's persist + score shutdown path. Without it a
         finished interview idles until the hard duration guard trips.
+
+        Hard guard: refuses to close while planned questions remain, so a
+        premature call cannot truncate the interview to 1-2 questions.
         """
+        ud = context.userdata
+        is_wrap_turn = (
+            ud.ctx.cursor == len(ud.ctx.plan.questions) - 1
+            and state.current_section(ud) == "wrap"
+        )
+        if not state.is_complete(ud) and not is_wrap_turn:
+            q = state.current_question(ud)
+            total = len(ud.ctx.plan.questions)
+            left = max(0, total - ud.ctx.cursor)
+            primary = ud.ctx.plan.language_mode.primary
+            cur = _localized(q.text, primary) if q is not None else "(no question)"
+            return (
+                f"Not finished yet — {left} of {total} questions remain. "
+                f"Do NOT end. Continue with the current question: {cur} "
+                "Ask it, call save_answer, then get_next_question."
+            )
+        if is_wrap_turn:
+            state.advance(ud)
         try:
             self.session.shutdown(drain=True)
         except Exception:  # noqa: BLE001, S110 - closing must never raise into the turn

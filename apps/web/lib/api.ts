@@ -1,7 +1,9 @@
 import {
+  InterviewContextSchema,
   PrepResponseSchema,
   ScoreResponseSchema,
   StudyPlanSchema,
+  type InterviewContext,
   type PrepRequest,
   type PrepResponse,
   type ScoreCard,
@@ -42,6 +44,17 @@ async function postJson<T>(
 /** Kick off the prep pipeline for a CV + JD + company. */
 export function requestPrep(body: PrepRequest): Promise<PrepResponse> {
   return postJson("/api/prep", body, (d) => PrepResponseSchema.parse(d));
+}
+
+/** Clone a cached InterviewContext into a fresh ready session (0 LLM calls). */
+export function requestSessionFromContext(
+  context: InterviewContext,
+  userId?: string,
+): Promise<PrepResponse> {
+  const parsed = InterviewContextSchema.parse(context);
+  return postJson("/api/session/from-context", { context: parsed, user_id: userId }, (d) =>
+    PrepResponseSchema.parse(d),
+  );
 }
 
 /** Score a completed interview session. */

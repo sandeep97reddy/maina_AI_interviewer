@@ -1,9 +1,9 @@
-"""WP-7 post / scoring pipeline.
+"""WP-7 post / scoring pipeline (unified 2-call holistic).
 
 Turns a completed interview (a persisted ``InterviewContext`` with answers) into
 a ``ScoreCard`` and persists it. The post phase is latency-tolerant, so this is a
-plain sequential pipeline (no LangGraph): evaluate competencies → assess spoken
-language → assemble the report.
+plain sequential pipeline (no LangGraph): holistic scores+language (1 LLM call)
+→ narrative+model-answers (1 LLM call).
 
 Public entry point — the stable contract the API layer and tests depend on::
 
@@ -18,6 +18,9 @@ status.
 The loop contract: each ``CompetencyScore.competency`` equals some planned
 question's ``target_competency``, and ``weak_competencies`` (the weak/developing
 subset) is what the Prep Coach consumes to choose what to teach next.
+
+Legacy per-question modules (``evaluator``, ``language_coach``, ``report``)
+remain for reference/fallback but are no longer on the hot path.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from .report import (
     _weak_competencies,
     generate_report,
 )
+from .simple_evaluator import build_scorecard, score_pass1
 from .verifier import verify_scores
 
 if TYPE_CHECKING:
@@ -44,7 +48,15 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
-__all__ = ["coach", "evaluate", "generate_report", "run_score", "verify_scores"]
+__all__ = [
+    "build_scorecard",
+    "coach",
+    "evaluate",
+    "generate_report",
+    "run_score",
+    "score_pass1",
+    "verify_scores",
+]
 
 
 def _missing_context_scorecard(session_id: str) -> ScoreCard:
@@ -243,21 +255,20 @@ async def _run_score_locked(req: ScoreRequest, deps: Deps) -> ScoreCard:
     # Trace the scoring work so `deepinterview traces` and GET /api/traces show
     # per-stage spans + LLM calls for this session. No-op when disabled.
     with start_trace("score", session_id=req.session_id):
-        with start_span("post.evaluate"):
-            comp_scores = await _guarded(evaluate(ctx, deps), label="evaluate", timeout=timeout)
-        if comp_scores is None:
-            # The WHOLE evaluate stage failed for an interview that HAS answers
-            # (per-question failures are isolated inside evaluate; None means the
-            # stage itself died). Persisting a zero-score card as "complete" would
-            # misreport an answered interview as scoring 0 — mark the session
-            # errored (retriable: a later /api/score re-runs from the same context)
-            # and return a well-formed card without persisting it.
-            log.error("post: evaluate stage failed for %s; marking error (no card persisted)", req.session_id)
+        # Unified call 1: holistic scores + language in one pass.
+        with start_span("post.unified_scores"):
+            pass1 = await _guarded(score_pass1(ctx, deps), label="unified_scores", timeout=timeout)
+        if pass1 is None:
+            # Call 1 failed for an interview that HAS answers. Mark errored
+            # (retriable) and return a well-formed card without persisting it —
+            # never a misleading zero-score "complete" card.
+            log.error("post: unified scoring failed for %s; marking error (no card persisted)", req.session_id)
             await deps.repo.update_status(req.session_id, "error")
             return _degraded_scorecard(ctx, [], _fallback_language_report())
+        comp_scores, lang_report = pass1
 
-        # Optional adversarial calibration pass (gated, OFF by default). Guarded so a
-        # verifier failure leaves the evaluated scores untouched rather than degrading.
+        # Optional adversarial calibration pass (gated, OFF by default). Works
+        # on unified scores unchanged; failure keeps them untouched.
         if deps.settings.enable_score_verifier:
             with start_span("post.verify"):
                 verified = await _guarded(
@@ -266,15 +277,12 @@ async def _run_score_locked(req: ScoreRequest, deps: Deps) -> ScoreCard:
             if verified is not None:
                 comp_scores = verified
 
-        with start_span("post.coach"):
-            lang_report = await _guarded(coach(ctx, deps), label="coach", timeout=timeout)
-        if lang_report is None:
-            lang_report = _fallback_language_report()
-
-        with start_span("post.report"):
+        # Unified call 2: narrative + model answers. Failure preserves the
+        # numbers in degraded form rather than discarding the interview.
+        with start_span("post.unified_report"):
             scorecard = await _guarded(
-                generate_report(ctx, comp_scores, lang_report, deps),
-                label="generate_report",
+                build_scorecard(ctx, comp_scores, lang_report, deps),
+                label="unified_report",
                 timeout=timeout,
             )
         if scorecard is None:

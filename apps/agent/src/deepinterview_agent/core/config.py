@@ -209,11 +209,24 @@ class Settings(BaseSettings):
     # additionally has per-stage timeouts.
     llm_call_timeout_sec: float = 90.0
 
+    # --- Gemini thinking budgets (per-node quality/cost tiers) ----------------
+    # Gemini 2.5/3 Flash spends 1000-2000 hidden thinking tokens per call by
+    # default. Context caching pays for quality on repeats, so:
+    #   high (1024) = question planner — needs the deepest reasoning
+    #   mid  (512)  = gap matching + unified scoring pass 1
+    #   low  (0)    = cv/jd/company + narratives — structured extraction only
+    # Env-overridable via GEMINI_THINKING_BUDGET_{HIGH,MID,LOW}. Unknown models
+    # that reject a budget fall back to no thinking_config (see llm.py).
+    gemini_thinking_budget_high: int = 1024
+    gemini_thinking_budget_mid: int = 512
+    gemini_thinking_budget_low: int = 0
+
     # --- live: adaptive interview (off the turn-critical path) ----------------
     # When on, the background Director caches an advisory difficulty
-    # recommendation and the interviewer exposes a get_difficulty_hint tool. The
-    # turn path never blocks on it. Default OFF so the lean live loop and the
-    # offline suite are unchanged. Override via ENABLE_ADAPTIVE_DIFFICULTY.
+    # recommendation (pure state.evaluate_difficulty; no turn-path tool — the
+    # get_difficulty_hint tool was removed to keep the live tool schema lean).
+    # The turn path never blocks on it. Default OFF so the lean live loop and
+    # the offline suite are unchanged. Override via ENABLE_ADAPTIVE_DIFFICULTY.
     enable_adaptive_difficulty: bool = False
 
     # --- post: adversarial score verifier (off the turn-critical path) --------
@@ -238,7 +251,8 @@ class Settings(BaseSettings):
     # never run unbounded (a stalled/looping LLM would otherwise burn voice
     # minutes forever). These are the in-code per-tier caps; a per-session
     # override can later be threaded in via RoomMetadata.
-    max_interview_duration_sec: int = 1200  # 20 min wall-clock hard stop
+    # 7 questions x ~3min + intro/wrap buffer = ~25 min.
+    max_interview_duration_sec: int = 1500  # 25 min wall-clock hard stop
     max_interview_turns: int = 80  # transcript turns hard stop
 
     # --- live: durability -----------------------------------------------------

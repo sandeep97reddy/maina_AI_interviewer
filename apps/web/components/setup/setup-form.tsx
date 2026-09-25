@@ -3,8 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { UploadCloud, FileText, X } from "lucide-react";
-import { type LanguageMode } from "@deepinterview/shared";
-import { startSession } from "@/app/setup/actions";
+import { type InterviewContext, type LanguageMode } from "@deepinterview/shared";
+import { startSession, startSessionFromContext } from "@/app/setup/actions";
+import {
+  clearCachedContext,
+  describeCachedContext,
+  loadCachedContext,
+  type CachedContextEntry,
+} from "@/lib/context-cache";
 import {
   EMPTY_LIBRARY,
   loadLibrary,
@@ -69,8 +75,17 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
   // Saved library (this browser only). Empty on first paint; populated after
   // mount so the server prerender never touches localStorage (SSR-safe).
   const [lib, setLib] = useState<Library>(EMPTY_LIBRARY);
+  // Cached interview context for instant reuse. ON by default per owner
+  // request — uncheck to run fresh AI prep.
+  const [cached, setCached] = useState<CachedContextEntry | null>(null);
+  const [reuseCached, setReuseCached] = useState(true);
   useEffect(() => {
     setLib(loadLibrary());
+    try {
+      setCached(loadCachedContext());
+    } catch {
+      setCached(null);
+    }
   }, []);
 
   // --- Client-side input validation (friendly; backend is the real guard) ---
@@ -167,6 +182,35 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+
+    // Instant reuse path: skip validation + prep entirely (0 API calls).
+    // Toggle sits just above Start so it is impossible to miss.
+    if (reuseCached && cached) {
+      setSubmitting(true);
+      try {
+        const cachedContext: InterviewContext = cached.context;
+        const result = await startSessionFromContext(cachedContext);
+        if (!result.ok) {
+          if (result.reason === "auth_required") {
+            router.push("/login?next=/setup");
+            return;
+          }
+          setError(result.error);
+          setSubmitting(false);
+          return;
+        }
+        router.push(
+          `/session/${result.session_id}${
+            personaId ? `?persona=${encodeURIComponent(personaId)}` : ""
+          }`,
+        );
+        return;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : t(messages, "common.error"));
+        setSubmitting(false);
+        return;
+      }
+    }
 
     // Client-side validation. CV can be a file OR pasted text; JD required +
     // min length; company is optional. Surface inline field errors and bail.
@@ -657,14 +701,52 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
         </p>
       )}
 
+      {cached && (
+        <Card className="border-accent">
+          <CardContent className="flex flex-col gap-2 py-4">
+            <label className="flex cursor-pointer items-start gap-3">
+              <input
+                type="checkbox"
+                checked={reuseCached}
+                onChange={(e) => setReuseCached(e.target.checked)}
+                className="mt-1 h-4 w-4 accent-current"
+                aria-label="Reuse cached interview context"
+              />
+              <span>
+                <span className="block text-[14px] font-medium text-ink">
+                  ⚡ Reuse Previous Interview Context — skip AI prep, 0 API calls
+                </span>
+                <span className="mt-1 block text-[13px] leading-relaxed text-ink-soft">
+                  Ready: {describeCachedContext(cached)}.
+                  {reuseCached
+                    ? " Starting now reuses these questions instantly."
+                    : " Unchecked — starting will run fresh AI prep (uses API + ~2 min)."}
+                </span>
+              </span>
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                clearCachedContext();
+                setCached(null);
+                setReuseCached(false);
+              }}
+              className="self-start text-[12px] text-muted underline hover:text-ink"
+            >
+              Clear cache
+            </button>
+          </CardContent>
+        </Card>
+      )}
+
       <Button
         type="submit"
         size="lg"
         className="self-start"
-        disabled={!canSubmit}
-        aria-disabled={!canSubmit}
+        disabled={submitting ? true : reuseCached && cached ? false : !canSubmit}
+        aria-disabled={submitting ? true : reuseCached && cached ? false : !canSubmit}
       >
-        {t(messages, "setup.start")}
+        {reuseCached && cached ? "Start interview instantly" : t(messages, "setup.start")}
       </Button>
     </form>
   );

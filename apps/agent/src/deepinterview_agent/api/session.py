@@ -4,6 +4,9 @@
 steps, input-quality warnings, and the :class:`InterviewContext` once ready).
 Unknown ids → 404.
 
+``POST /api/session/from-context`` clones a cached ``InterviewContext`` into a
+fresh ready session (0 LLM calls) for instant repeat practice.
+
 ``POST /api/session/{id}/live-result`` is the INTERNAL write path the voice
 worker uses at shutdown. The worker runs in a separate process, so with no
 Supabase configured its own in-memory repo is invisible to the API — answers
@@ -18,9 +21,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..core.deps import build_deps
-from ..shared_models import InterviewContext
+from ..shared_models import InterviewContext, PrepRequest, PrepResponse
 from .auth import require_internal_secret
-from .views import SessionView
+from .views import PROGRESS_STEPS, SessionView
 
 router = APIRouter()
 
@@ -44,6 +47,52 @@ _ALLOWED_LIVE_STATUSES = {"no_answers", "error"}
 # Once a session reaches one of these it is done; a late/replayed live-result
 # write must not be able to overwrite a scored interview's history.
 _TERMINAL_STATUSES = {"complete", "no_answers", "error", "rejected"}
+
+
+class FromContextRequest(BaseModel):
+    """Instant reuse: a previously cached InterviewContext + optional owner."""
+
+    model_config = ConfigDict(extra="forbid")
+    context: InterviewContext
+    user_id: str | None = None
+
+
+@router.post("/api/session/from-context", response_model=PrepResponse)
+async def from_context(req: FromContextRequest) -> PrepResponse:
+    """Clone a cached context into a fresh ``ready`` session (0 LLM calls).
+
+    Validates the context, mints a new session id, resets the live cursor
+    (``cursor=0``, ``answers=[]``, ``scorecard=None``), persists it, marks all
+    prep steps complete, and returns the new id. The cached plan/candidate/job
+    are reused verbatim.
+    """
+    if not req.context.plan.questions:
+        raise HTTPException(status_code=422, detail="Cached context has no questions")
+    deps = build_deps()
+    prep_req = PrepRequest(
+        cv_url="cached",
+        jd_text=req.context.job.raw_text or req.context.job.title,
+        company=req.context.job.company_name,
+        language_mode=req.context.plan.language_mode,
+        user_id=req.user_id,
+    )
+    session_id = await deps.repo.create_session(prep_req)
+    fresh = req.context.model_copy(
+        update={
+            "session_id": session_id,
+            "cursor": 0,
+            "answers": [],
+            "scorecard": None,
+        }
+    )
+    await deps.repo.save_context(session_id, fresh)
+    for step in PROGRESS_STEPS:
+        try:
+            await deps.repo.mark_progress(session_id, step)
+        except Exception:
+            pass
+    await deps.repo.update_status(session_id, "ready")
+    return PrepResponse(session_id=session_id)
 
 
 @router.get("/api/session/{session_id}", response_model=SessionView)

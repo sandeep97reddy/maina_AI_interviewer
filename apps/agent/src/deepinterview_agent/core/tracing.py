@@ -484,11 +484,15 @@ class TracedLLM:
     def __getattr__(self, item: str) -> Any:
         return getattr(self._inner, item)
 
-    async def complete_text(self, *, system: str, user: str) -> str:
+    async def complete_text(
+        self, *, system: str, user: str, thinking_budget: int | None = None
+    ) -> str:
         t0 = time.perf_counter()
         with start_span("llm.complete_text", provider=self._provider, model=self._model):
             try:
-                result = await self._inner.complete_text(system=system, user=user)
+                result = await self._inner.complete_text(
+                    system=system, user=user, thinking_budget=thinking_budget
+                )
             except Exception as exc:
                 record_llm_call(
                     provider=self._provider,
@@ -512,7 +516,9 @@ class TracedLLM:
             )
             return result
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+    async def complete_json(
+        self, *, system: str, user: str, schema: type, thinking_budget: int | None = None
+    ) -> Any:
         schema_name = getattr(schema, "__name__", str(schema))
         t0 = time.perf_counter()
         with start_span(
@@ -522,7 +528,9 @@ class TracedLLM:
             schema=schema_name,
         ):
             try:
-                result = await self._inner.complete_json(system=system, user=user, schema=schema)
+                result = await self._inner.complete_json(
+                    system=system, user=user, schema=schema, thinking_budget=thinking_budget
+                )
             except Exception as exc:
                 record_llm_call(
                     provider=self._provider,

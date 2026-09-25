@@ -91,9 +91,11 @@ def _assert_valid_scorecard(sc: ScoreCard, ctx: InterviewContext) -> None:
     scored = {cs.competency for cs in sc.competency_scores}
     assert set(sc.weak_competencies) <= scored
 
-    # A model answer per planned question.
-    answered_ids = {ma.question_id for ma in sc.model_answers}
-    assert answered_ids == {q.id for q in ctx.plan.questions}
+    # A model answer per ANSWERED question (unanswered are skipped, never
+    # hallucinated — matches report._model_answers + simple_evaluator).
+    answered_ids = {a.question_id for a in ctx.answers if (a.transcript or "").strip()}
+    assert {ma.question_id for ma in sc.model_answers} == answered_ids
+    assert answered_ids, "test precondition: at least one answer seeded"
 
     # Language report is well-formed.
     assert 0.0 <= sc.language_report.fluency_score <= 5.0
@@ -228,12 +230,11 @@ def test_run_score_reports_partial_coverage() -> None:
 
 
 def test_run_score_errors_when_evaluate_stage_fails(monkeypatch) -> None:
-    """Total evaluate failure must NOT persist a zero-score 'complete' card.
+    """Total unified-scores failure must NOT persist a zero-score 'complete' card.
 
-    Per-question failures are isolated inside ``evaluate``; if the WHOLE stage
-    dies, an answered interview must not read as scoring 0.0. The session is
-    marked errored (retriable — /api/score can re-run from the same context),
-    a valid card is still returned, and nothing is persisted.
+    If call 1 dies, an answered interview must not read as scoring 0.0. The
+    session is marked errored (retriable — /api/score can re-run from the same
+    context), a valid card is still returned, and nothing is persisted.
     """
     deps = build_deps()
     session_id, _ctx = _prepare_session(deps)
@@ -243,7 +244,7 @@ def test_run_score_errors_when_evaluate_stage_fails(monkeypatch) -> None:
     async def _boom(*args, **kwargs):
         raise RuntimeError("provider exploded")
 
-    monkeypatch.setattr(post, "evaluate", _boom)
+    monkeypatch.setattr(post, "score_pass1", _boom)
 
     sc = asyncio.run(run_score(ScoreRequest(session_id=session_id), deps))
 
@@ -268,7 +269,7 @@ def test_run_score_degrades_when_a_late_stage_fails(monkeypatch) -> None:
     async def _boom(*args, **kwargs):
         raise RuntimeError("provider exploded")
 
-    monkeypatch.setattr(post, "generate_report", _boom)
+    monkeypatch.setattr(post, "build_scorecard", _boom)
 
     sc = asyncio.run(run_score(ScoreRequest(session_id=session_id), deps))
 

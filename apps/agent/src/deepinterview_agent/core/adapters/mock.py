@@ -97,10 +97,16 @@ def build_mock(schema: type[BaseModel]) -> BaseModel:
 class MockLLM:
     """Deterministic LLM: canned text and schema-valid structured output."""
 
-    async def complete_text(self, *, system: str, user: str) -> str:
+    async def complete_text(
+        self, *, system: str, user: str, thinking_budget: int | None = None
+    ) -> str:
+        _ = (system, user, thinking_budget)
         return "This is a deterministic mock completion."
 
-    async def complete_json(self, *, system: str, user: str, schema: type) -> Any:
+    async def complete_json(
+        self, *, system: str, user: str, schema: type, thinking_budget: int | None = None
+    ) -> Any:
+        _ = (system, user, thinking_budget)
         return build_mock(schema)
 
 

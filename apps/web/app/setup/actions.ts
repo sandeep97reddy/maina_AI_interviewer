@@ -1,8 +1,8 @@
 "use server";
 
-import type { PrepRequest } from "@deepinterview/shared";
+import type { InterviewContext, PrepRequest } from "@deepinterview/shared";
 import { features } from "@deepinterview/ee";
-import { requestPrep } from "@/lib/api";
+import { requestPrep, requestSessionFromContext } from "@/lib/api";
 import { getUser } from "@/lib/supabase/server";
 import { isSupabaseConfigured } from "@/lib/env";
 
@@ -65,6 +65,39 @@ export async function startSession(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "Could not reach the prep service.";
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Instant reuse: build a fresh ready session from a cached InterviewContext
+ * (0 LLM calls). The agent clones the context under a new session id with
+ * cursor/answers/scorecard reset. Same auth gating as startSession.
+ */
+export async function startSessionFromContext(
+  context: InterviewContext,
+): Promise<StartSessionResult> {
+  let userId: string | null = null;
+
+  if (isSupabaseConfigured()) {
+    const user = await getUser();
+    if (user) userId = user.id;
+  }
+
+  if (!userId && features.auth) {
+    return {
+      ok: false,
+      error: "Sign in to start an interview.",
+      reason: "auth_required",
+    };
+  }
+
+  try {
+    const { session_id } = await requestSessionFromContext(context, userId ?? undefined);
+    return { ok: true, session_id };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Could not reuse the cached context.";
     return { ok: false, error: message };
   }
 }

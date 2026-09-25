@@ -228,7 +228,7 @@ def _fallback_plan(
             target_competency="Communication",
         ),
         PlannedQuestion(
-            id="q_technical",
+            id="q_technical_1",
             section="technical",
             text={
                 "en": f"In your work relevant to this {job_title} position, could you walk me through an architecture or technical challenge you tackled and how you decided on the final solution?",
@@ -243,6 +243,57 @@ def _fallback_plan(
                 "What trade-offs or constraints did you face, and what would you do differently in retrospect?",
             ],
             target_competency="Technical Execution",
+        ),
+        PlannedQuestion(
+            id="q_technical_2",
+            section="technical",
+            text={
+                "en": f"Thinking about scale and reliability for the {job_title} role, how would you design a service at {company_name} to handle a 10x traffic spike without dropping requests?",
+                primary: f"Thinking about scale and reliability for the {job_title} role, how would you design a service at {company_name} to handle a 10x traffic spike without dropping requests?",
+            },
+            difficulty=4,
+            rubric=[
+                RubricItem(criterion="System design", weight=0.6, description="Covers scaling, caching, queues and failure modes"),
+                RubricItem(criterion="Tradeoffs", weight=0.4, description="Compares options and justifies choices"),
+            ],
+            followups=[
+                "Where would the first bottleneck appear, and how would you detect it?",
+            ],
+            target_competency="System Design",
+        ),
+        PlannedQuestion(
+            id="q_technical_3",
+            section="technical",
+            text={
+                "en": f"Tell me about the hardest production bug you debugged. How did you isolate it and prove the fix?",
+                primary: f"Tell me about the hardest production bug you debugged. How did you isolate it and prove the fix?",
+            },
+            difficulty=4,
+            rubric=[
+                RubricItem(criterion="Debugging rigor", weight=0.6, description="Structured isolation and verification"),
+                RubricItem(criterion="Communication", weight=0.4, description="Clear timeline of actions"),
+            ],
+            followups=[
+                "What monitoring or test would have caught it earlier?",
+            ],
+            target_competency="Problem Solving",
+        ),
+        PlannedQuestion(
+            id="q_coding",
+            section="coding",
+            text={
+                "en": f"Let's do a short hands-on problem: given an array of intervals, how would you merge overlapping ones? Talk through your approach and complexity.",
+                primary: f"Let's do a short hands-on problem: given an array of intervals, how would you merge overlapping ones? Talk through your approach and complexity.",
+            },
+            difficulty=3,
+            rubric=[
+                RubricItem(criterion="Algorithmic thinking", weight=0.6, description="Correct approach and complexity"),
+                RubricItem(criterion="Think-aloud", weight=0.4, description="Explains reasoning step by step"),
+            ],
+            followups=[
+                "What is the time and space complexity, and what edge cases matter?",
+            ],
+            target_competency="Coding Ability",
         ),
         PlannedQuestion(
             id="q_behavioral",
@@ -278,11 +329,24 @@ def _fallback_plan(
     ]
 
     return QuestionPlan(
-        sections_order=["intro", "technical", "behavioral", "wrap"],
+        sections_order=["intro", "technical", "coding", "behavioral", "wrap"],
         questions=questions,
-        time_budget_min=30,
+        time_budget_min=25,
         language_mode=language_mode,
     )
+
+
+def _thinking(deps: Deps, tier: str) -> int | None:
+    """Per-node Gemini thinking budget (None = adapter default for mocks)."""
+    try:
+        settings = deps.settings
+    except Exception:
+        return None
+    if tier == "high":
+        return getattr(settings, "gemini_thinking_budget_high", 1024)
+    if tier == "mid":
+        return getattr(settings, "gemini_thinking_budget_mid", 512)
+    return getattr(settings, "gemini_thinking_budget_low", 0)
 
 
 @traced("prep.cv_analysis")
@@ -291,7 +355,10 @@ async def cv_analysis(state: PrepState, deps: Deps) -> PrepState:
     system, user = cv_analysis_prompts(state["cv_text"])
     try:
         candidate = await deps.llm.complete_json(
-            system=system, user=user, schema=CandidateProfile
+            system=system,
+            user=user,
+            schema=CandidateProfile,
+            thinking_budget=_thinking(deps, "low"),
         )
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
         log.warning("cv_analysis failed, using fallback profile (%s)", exc)
@@ -307,7 +374,12 @@ async def jd_analysis(state: PrepState, deps: Deps) -> PrepState:
     req = state["req"]
     system, user = jd_analysis_prompts(req.jd_text, req.company)
     try:
-        job = await deps.llm.complete_json(system=system, user=user, schema=JobSpec)
+        job = await deps.llm.complete_json(
+            system=system,
+            user=user,
+            schema=JobSpec,
+            thinking_budget=_thinking(deps, "low"),
+        )
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
         log.warning("jd_analysis failed, using fallback job spec (%s)", exc)
         job = _fallback_job(req)
@@ -366,7 +438,10 @@ async def company_research(state: PrepState, deps: Deps) -> PrepState:
     system, user = company_research_prompts(company, snippets)
     try:
         intel = await deps.llm.complete_json(
-            system=system, user=user, schema=CompanyIntel
+            system=system,
+            user=user,
+            schema=CompanyIntel,
+            thinking_budget=_thinking(deps, "low"),
         )
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
         log.warning("company_research failed, using minimal intel (%s)", exc)
@@ -389,7 +464,10 @@ async def gap_matching(state: PrepState, deps: Deps) -> PrepState:
     system, user = gap_matching_prompts(state["candidate"], state["job"])
     try:
         gap = await deps.llm.complete_json(
-            system=system, user=user, schema=GapAnalysis
+            system=system,
+            user=user,
+            schema=GapAnalysis,
+            thinking_budget=_thinking(deps, "mid"),
         )
     except Exception as exc:  # noqa: BLE001 - resilient: degrade, don't crash prep
         log.warning("gap_matching failed, using minimal analysis (%s)", exc)
@@ -484,7 +562,10 @@ async def question_planner(state: PrepState, deps: Deps) -> PrepState:
         )
     try:
         plan = await deps.llm.complete_json(
-            system=system, user=user, schema=QuestionPlan
+            system=system,
+            user=user,
+            schema=QuestionPlan,
+            thinking_budget=_thinking(deps, "high"),
         )
     except Exception as exc:  # noqa: BLE001 - keystone must still emit a valid plan
         log.warning("question_planner failed, using tailored fallback plan (%s)", exc)

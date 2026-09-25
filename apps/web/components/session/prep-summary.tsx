@@ -23,6 +23,7 @@ import {
   PREP_STEPS,
   type ClientSessionView,
 } from "@/lib/session";
+import { saveCachedContext } from "@/lib/context-cache";
 import { cn } from "@/lib/cn";
 import { Eyebrow } from "@/components/ui/eyebrow";
 import { Badge } from "@/components/ui/badge";
@@ -94,6 +95,18 @@ export function PrepSummary({
     setView(null);
     setRetryKey((k) => k + 1);
   }, [sessionId]);
+
+  // Cache every completed prep in this browser for instant reuse on /setup.
+  // Best-effort: storage failure must never affect the ready view.
+  useEffect(() => {
+    if (view?.status === "ready" && view.context) {
+      try {
+        saveCachedContext(view.context);
+      } catch {
+        // ignore
+      }
+    }
+  }, [view?.status, view?.context]);
 
   const goSetup = useCallback(() => router.push("/setup"), [router]);
   const goInterview = useCallback(() => {

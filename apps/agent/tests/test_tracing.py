@@ -181,7 +181,7 @@ def test_score_run_emits_trace(tracedir) -> None:
     assert score_traces, "expected a score trace"
     events = [json.loads(line) for line in score_traces[0].read_text().splitlines()]
     span_names = {e["name"] for e in events if e["type"] == "span_start"}
-    assert {"post.evaluate", "post.coach", "post.report"} <= span_names
+    assert {"post.unified_scores", "post.unified_report"} <= span_names
 
 
 def test_traces_api_lists_and_shows(tracedir, monkeypatch) -> None:

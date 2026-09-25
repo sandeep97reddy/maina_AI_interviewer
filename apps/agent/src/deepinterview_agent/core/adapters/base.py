@@ -23,11 +23,25 @@ class SearchResult(BaseModel):
 
 @runtime_checkable
 class LLMAdapter(Protocol):
-    """Text + structured-JSON completion."""
+    """Text + structured-JSON completion.
 
-    async def complete_text(self, *, system: str, user: str) -> str: ...
+    ``thinking_budget`` is an optional Gemini thinking hint (None = adapter
+    default). All adapters accept and may ignore it so callers can pass
+    per-node budgets without branching on provider.
+    """
 
-    async def complete_json(self, *, system: str, user: str, schema: type[T]) -> T: ...
+    async def complete_text(
+        self, *, system: str, user: str, thinking_budget: int | None = None
+    ) -> str: ...
+
+    async def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: type[T],
+        thinking_budget: int | None = None,
+    ) -> T: ...
 
 
 @runtime_checkable
