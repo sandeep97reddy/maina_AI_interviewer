@@ -64,10 +64,10 @@ def main() -> None:
     print()
 
     env_vars = sync_env()
-    proc_env = {**os.environ, **env_vars}
+    proc_env = {**os.environ, **env_vars, "PYTHONUNBUFFERED": "1"}
 
     # 1. Edge TTS Bridge
-    edge_log = open(LOGS_DIR / "edge_tts.log", "w", encoding="utf-8")
+    edge_log = open(LOGS_DIR / "edge_tts.log", "w", encoding="utf-8", buffering=1)
     print("[1/4] Starting Microsoft Edge Neural Voice Bridge (Port 8880)...")
     p_edge = subprocess.Popen(
         [str(PYTHON_EXE), "services/edge_tts_server.py"],
@@ -79,7 +79,7 @@ def main() -> None:
     processes.append(("Edge-TTS", p_edge))
 
     # 2. Agent API
-    agent_log = open(LOGS_DIR / "agent_api.log", "w", encoding="utf-8")
+    agent_log = open(LOGS_DIR / "agent_api.log", "w", encoding="utf-8", buffering=1)
     print("[2/4] Starting Agent API Backend (Port 8000)...")
     p_api = subprocess.Popen(
         [str(PYTHON_EXE), "-m", "uvicorn", "deepinterview_agent.app:app", "--port", "8000"],
@@ -91,7 +91,7 @@ def main() -> None:
     processes.append(("Agent-API", p_api))
 
     # 3. Live Voice Worker
-    worker_log = open(LOGS_DIR / "worker.log", "w", encoding="utf-8")
+    worker_log = open(LOGS_DIR / "worker.log", "w", encoding="utf-8", buffering=1)
     print("[3/4] Starting Live Voice Worker (LiveKit Agent)...")
     p_worker = subprocess.Popen(
         [str(PYTHON_EXE), "-m", "deepinterview_agent.worker", "start"],
@@ -103,7 +103,7 @@ def main() -> None:
     processes.append(("Worker", p_worker))
 
     # 4. Next.js Web App
-    web_log = open(LOGS_DIR / "web.log", "w", encoding="utf-8")
+    web_log = open(LOGS_DIR / "web.log", "w", encoding="utf-8", buffering=1)
     print("[4/4] Starting Next.js Web Application (Port 3000)...")
     p_web = subprocess.Popen(
         ["pnpm.cmd", "--filter", "@deepinterview/web", "dev"],

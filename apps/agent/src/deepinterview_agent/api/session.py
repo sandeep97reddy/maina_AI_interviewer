@@ -66,6 +66,14 @@ class FromContextRequest(BaseModel):
     user_id: str | None = None
 
 
+class NewQuestionsRequest(BaseModel):
+    """Fresh questions request: optional context and user owner so reuse works across restarts."""
+
+    model_config = ConfigDict(extra="forbid")
+    context: InterviewContext | None = None
+    user_id: str | None = None
+
+
 @router.post("/api/session/from-context", response_model=PrepResponse)
 async def from_context(req: FromContextRequest) -> PrepResponse:
     """Clone a cached context into a fresh ``ready`` session (0 LLM calls).
@@ -126,19 +134,28 @@ def _overlap_fraction(previous: set[str], candidate: list[str]) -> float:
 
 
 @router.post("/api/session/{session_id}/new-questions", response_model=PrepResponse)
-async def new_questions(session_id: str) -> PrepResponse:
+async def new_questions(
+    session_id: str,
+    req: NewQuestionsRequest | None = None,
+) -> PrepResponse:
     """Fresh question set for a finished prep, reusing its saved analysis.
 
-    Loads the session's ``InterviewContext`` (candidate/job/company/gap stay
-    untouched) and makes a single planner LLM call — via ``deps.llm``, i.e. the
-    analytic ``gemini_model`` (full Flash), never the live ``flash-lite`` tier —
-    with the previous questions as an avoid-list. The new plan mirrors the old
-    one's count + section order so the live loop and handoff personas keep
-    working. One retry on heavy overlap; a total LLM failure surfaces as 502
-    (no silent static fallback — that would return the SAME questions).
+    Loads the session's ``InterviewContext`` (either passed directly in ``req``
+    or loaded from ``session_id`` in repo) and makes a single planner LLM call — via
+    ``deps.llm``, i.e. the analytic ``gemini_model`` (full Flash), never the live
+    ``flash-lite`` tier — with the previous questions as an avoid-list. The new
+    plan mirrors the old one's count + section order so the live loop and handoff
+    personas keep working. One retry on heavy overlap; a total LLM failure surfaces
+    as 502 (no silent static fallback — that would return the SAME questions).
     """
     deps = build_deps()
-    ctx = await deps.repo.load_context(session_id)
+    ctx: InterviewContext | None = None
+    user_id: str | None = None
+    if req is not None:
+        ctx = req.context
+        user_id = req.user_id
+    if ctx is None:
+        ctx = await deps.repo.load_context(session_id)
     if ctx is None:
         raise HTTPException(status_code=404, detail="Unknown session_id")
     old_qs = ctx.plan.questions
@@ -176,11 +193,19 @@ async def new_questions(session_id: str) -> PrepResponse:
             attempt = None
         if attempt is None or not attempt.questions:
             continue
-        attempt = attempt.model_copy(update={"language_mode": ctx.plan.language_mode})
-        if len(attempt.questions) != len(old_qs) or [
-            q.section for q in attempt.questions
-        ] != sections:
-            # Wrong shape for the live loop — retry once, then fail honestly.
+        seen_sections = list(dict.fromkeys(q.section for q in attempt.questions))
+        attempt = attempt.model_copy(
+            update={
+                "language_mode": ctx.plan.language_mode,
+                "sections_order": seen_sections,
+            }
+        )
+        shape_mismatch = (
+            len(attempt.questions) != len(old_qs)
+            or [q.section for q in attempt.questions] != sections
+        )
+        if shape_mismatch and not firm:
+            # On first attempt, retry once to match original shape strictly
             log.warning("new-questions: plan shape mismatch, retrying")
             continue
         fresh_texts = [
@@ -203,6 +228,7 @@ async def new_questions(session_id: str) -> PrepResponse:
         jd_text=ctx.job.raw_text or ctx.job.title,
         company=ctx.job.company_name,
         language_mode=ctx.plan.language_mode,
+        user_id=user_id,
     )
     new_id = await deps.repo.create_session(prep_req)
     fresh = ctx.model_copy(

@@ -93,22 +93,33 @@ async def create_speech(req: SpeechRequest) -> Response:
             status_code=500, detail="edge-tts not installed (pip/uv install edge-tts)"
         ) from exc
 
-    try:
-        communicate = edge_tts.Communicate(text, voice)
-        chunks: list[bytes] = []
-        async for chunk in communicate.stream():
-            if chunk.get("type") == "audio":
-                data = chunk.get("data")
-                if data:
-                    chunks.append(data)
-    except Exception as exc:  # noqa: BLE001 - surface Edge failures as 502
-        log.exception("edge-tts synthesis failed (voice=%s)", voice)
-        raise HTTPException(status_code=502, detail=f"Edge TTS failed: {exc}") from exc
+    import asyncio
 
-    audio = b"".join(chunks)
-    if not audio:
-        raise HTTPException(status_code=502, detail="Edge TTS returned no audio")
-    return Response(content=audio, media_type="audio/mpeg")
+    last_err: Exception | None = None
+    voices_to_try = [voice]
+    if voice != DEFAULT_VOICE:
+        voices_to_try.append(DEFAULT_VOICE)
+
+    for v in voices_to_try:
+        for attempt in range(2):
+            try:
+                communicate = edge_tts.Communicate(text, v)
+                chunks: list[bytes] = []
+                async for chunk in communicate.stream():
+                    if chunk.get("type") == "audio":
+                        data = chunk.get("data")
+                        if data:
+                            chunks.append(data)
+                audio = b"".join(chunks)
+                if audio:
+                    return Response(content=audio, media_type="audio/mpeg")
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+                log.warning("edge-tts synthesis attempt %d failed for voice %s: %s", attempt + 1, v, exc)
+                await asyncio.sleep(0.3)
+
+    log.exception("edge-tts synthesis failed for all attempts (voice=%s): %s", voice, last_err)
+    raise HTTPException(status_code=502, detail=f"Edge TTS failed: {last_err}")
 
 
 def main() -> None:

@@ -307,7 +307,7 @@ export function SetupForm({ r2Configured }: { r2Configured: boolean }) {
     setError(null);
     setRefreshing(true);
     try {
-      const result = await refreshQuestions(cached.context.session_id);
+      const result = await refreshQuestions(cached.context.session_id, cached.context);
       if (!result.ok) {
         if (result.reason === "auth_required") {
           router.push("/login?next=/setup");

@@ -130,6 +130,7 @@ export function PrepSummary({
 
       {status === "ready" && view?.context && (
         <ReadyView
+          key={sessionId}
           sessionId={sessionId}
           persona={persona}
           context={view.context}
@@ -666,16 +667,16 @@ function ReadyView({
     setRefreshing(true);
     try {
       const { refreshQuestions } = await import("@/app/setup/actions");
-      const result = await refreshQuestions(sessionId);
+      const result = await refreshQuestions(sessionId, context);
       if (!result.ok) {
         setRefreshError(result.error);
-        setRefreshing(false);
         return;
       }
       const q = persona ? `?persona=${encodeURIComponent(persona)}` : "";
       router.push(`/session/${result.session_id}${q}`);
     } catch (err) {
       setRefreshError(err instanceof Error ? err.message : "Could not generate fresh questions.");
+    } finally {
       setRefreshing(false);
     }
   }
@@ -732,9 +733,13 @@ function ReadyView({
         </Button>
       </div>
       {refreshError && (
-        <p className="mt-3 text-[13px] text-ink-soft" role="alert">
+        <div
+          role="alert"
+          aria-live="assertive"
+          className="mt-4 rounded-[10px] border border-accent/40 bg-accent/5 p-3 text-[13px] leading-relaxed text-accent"
+        >
           {refreshError}
-        </p>
+        </div>
       )}
     </div>
   );

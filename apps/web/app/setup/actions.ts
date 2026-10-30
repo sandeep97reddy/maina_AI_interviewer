@@ -108,6 +108,7 @@ export async function startSessionFromContext(
  */
 export async function refreshQuestions(
   sessionId: string,
+  context?: InterviewContext,
 ): Promise<StartSessionResult> {
   let userId: string | null = null;
 
@@ -125,7 +126,11 @@ export async function refreshQuestions(
   }
 
   try {
-    const { session_id } = await requestNewQuestions(sessionId);
+    const { session_id } = await requestNewQuestions(
+      sessionId,
+      context,
+      userId ?? undefined,
+    );
     return { ok: true, session_id };
   } catch (err) {
     const message =

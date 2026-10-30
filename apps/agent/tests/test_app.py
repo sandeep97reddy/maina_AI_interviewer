@@ -132,3 +132,23 @@ def test_new_questions_endpoint_clones_analysis_with_fresh_session() -> None:
 def test_new_questions_endpoint_404_for_unknown_id() -> None:
     resp = _client().post("/api/session/sess_does_not_exist/new-questions", json={})
     assert resp.status_code == 404
+
+
+def test_new_questions_endpoint_succeeds_with_provided_context_when_id_unknown() -> None:
+    client = _client()
+    old_id = _ready_session_id(client)
+    old_ctx = client.get(f"/api/session/{old_id}").json()["context"]
+
+    # Even if session_id does not exist in memory/db, passing context allows instant fresh questions
+    resp = client.post(
+        "/api/session/sess_does_not_exist/new-questions",
+        json={"context": old_ctx, "user_id": "user_123"},
+    )
+    assert resp.status_code == 200
+    new_id = resp.json()["session_id"]
+    assert new_id != old_id
+
+    view = client.get(f"/api/session/{new_id}")
+    assert view.status_code == 200
+    assert view.json()["status"] == "ready"
+    assert view.json()["context"]["candidate"] == old_ctx["candidate"]

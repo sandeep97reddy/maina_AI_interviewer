@@ -58,10 +58,21 @@ export function requestSessionFromContext(
 }
 
 /** Fresh question set for a past session (1 planner LLM call, analysis reused). */
-export function requestNewQuestions(sessionId: string): Promise<PrepResponse> {
+export function requestNewQuestions(
+  sessionId: string,
+  context?: InterviewContext,
+  userId?: string,
+): Promise<PrepResponse> {
+  const body: { context?: InterviewContext; user_id?: string } = {};
+  if (context) {
+    body.context = InterviewContextSchema.parse(context);
+  }
+  if (userId) {
+    body.user_id = userId;
+  }
   return postJson(
     `/api/session/${encodeURIComponent(sessionId)}/new-questions`,
-    {},
+    body,
     (d) => PrepResponseSchema.parse(d),
   );
 }
